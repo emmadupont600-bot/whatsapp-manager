@@ -9,7 +9,7 @@
 :root{
   --bg:#0f0f0f;--surface:#1a1a1a;--surface2:#222;--border:#2e2e2e;
   --text:#e8e8e8;--muted:#888;--faint:#444;
-  --green:#22c55e;--red:#ef4444;--yellow:#f59e0b;--blue:#60a5fa;
+  --green:#22c55e;--red:#ef4444;--yellow:#f59e0b;--blue:#60a5fa;--purple:#a78bfa;
   --primary:#25d366;--primary-hover:#1db954;
   --radius:10px;--radius-sm:6px;--font:'Satoshi',sans-serif;
 }
@@ -33,24 +33,27 @@ body{font-family:var(--font);background:var(--bg);color:var(--text);min-height:1
 .card-title{font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:12px}
 .grid-4{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}
 .grid-2{display:grid;grid-template-columns:repeat(2,1fr);gap:14px}
+.grid-3{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
 .stat-val{font-size:28px;font-weight:700;line-height:1}
 .stat-label{font-size:11px;color:var(--muted);margin-top:4px}
-.green{color:var(--green)}.red{color:var(--red)}.yellow{color:var(--yellow)}.blue{color:var(--blue)}
+.green{color:var(--green)}.red{color:var(--red)}.yellow{color:var(--yellow)}.blue{color:var(--blue)}.purple{color:var(--purple)}
 .badge{display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:99px;font-size:11px;font-weight:600}
 .badge-green{background:color-mix(in oklch,var(--green) 15%,transparent);color:var(--green)}
 .badge-red{background:color-mix(in oklch,var(--red) 15%,transparent);color:var(--red)}
 .badge-yellow{background:color-mix(in oklch,var(--yellow) 15%,transparent);color:var(--yellow)}
+.badge-blue{background:color-mix(in oklch,var(--blue) 15%,transparent);color:var(--blue)}
 .dot{width:7px;height:7px;border-radius:50%;background:currentColor}
 .btn{display:inline-flex;align-items:center;gap:6px;padding:8px 16px;border-radius:var(--radius-sm);border:none;font-family:var(--font);font-size:13px;font-weight:600;cursor:pointer;transition:all .15s}
 .btn-primary{background:var(--primary);color:#000}.btn-primary:hover{background:var(--primary-hover)}
 .btn-ghost{background:var(--surface2);color:var(--text);border:1px solid var(--border)}.btn-ghost:hover{background:var(--faint)}
 .btn-danger{background:color-mix(in oklch,var(--red) 15%,transparent);color:var(--red);border:1px solid color-mix(in oklch,var(--red) 25%,transparent)}
+.btn-orange{background:color-mix(in oklch,var(--yellow) 15%,transparent);color:var(--yellow);border:1px solid color-mix(in oklch,var(--yellow) 25%,transparent)}
 .btn-row{display:flex;gap:8px;flex-wrap:wrap}
 .form-group{display:flex;flex-direction:column;gap:6px;margin-bottom:14px}
 label{font-size:12px;font-weight:600;color:var(--muted)}
-input[type=text],input[type=url],textarea{background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:var(--radius-sm);padding:9px 12px;font-family:var(--font);font-size:13px;outline:none;transition:border-color .15s;width:100%}
+input[type=text],input[type=url],input[type=number],textarea,select{background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:var(--radius-sm);padding:9px 12px;font-family:var(--font);font-size:13px;outline:none;transition:border-color .15s;width:100%}
 textarea{resize:vertical;min-height:100px}
-input[type=text]:focus,input[type=url]:focus,textarea:focus{border-color:var(--primary)}
+input:focus,textarea:focus,select:focus{border-color:var(--primary)}
 .msg-preview{background:color-mix(in oklch,var(--primary) 8%,var(--surface2));border:1px solid color-mix(in oklch,var(--primary) 30%,transparent);border-radius:var(--radius-sm);padding:11px 13px;font-size:13px;line-height:1.6;white-space:pre-wrap;word-break:break-word;color:var(--text);margin-top:6px}
 .link-preview-box{background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px 12px;margin-top:8px;display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted)}
 .link-preview-box a{color:var(--primary);word-break:break-all}
@@ -58,7 +61,15 @@ input[type=text]:focus,input[type=url]:focus,textarea:focus{border-color:var(--p
 .msg-count{font-size:11px;color:var(--muted);margin-top:3px;text-align:right}
 .eta-box{background:color-mix(in oklch,var(--blue) 8%,var(--surface2));border:1px solid color-mix(in oklch,var(--blue) 25%,transparent);border-radius:var(--radius-sm);padding:9px 13px;font-size:12px;color:var(--muted);display:flex;align-items:center;gap:8px;margin-top:8px}
 .eta-box strong{color:var(--blue);font-size:14px}
-.resume-box{background:color-mix(in oklch,var(--yellow) 8%,var(--surface2));border:1px solid color-mix(in oklch,var(--yellow) 25%,transparent);border-radius:var(--radius-sm);padding:9px 13px;font-size:12px;color:var(--yellow);display:flex;align-items:center;gap:8px;margin-top:8px}
+.quota-box{background:color-mix(in oklch,var(--yellow) 8%,var(--surface2));border:1px solid color-mix(in oklch,var(--yellow) 30%,transparent);border-radius:var(--radius-sm);padding:12px 14px;font-size:13px;color:var(--yellow);margin-top:8px}
+.quota-box .quota-title{font-weight:700;margin-bottom:6px;font-size:14px}
+.quota-box .quota-reset{font-size:12px;color:var(--muted);margin-top:4px}
+.quota-progress{height:8px;background:var(--surface2);border-radius:99px;overflow:hidden;margin:8px 0 4px}
+.quota-fill{height:100%;background:var(--yellow);border-radius:99px;transition:width .4s}
+.quota-fill.full{background:var(--red)}
+.quota-fill.ok{background:var(--green)}
+.limit-input-row{display:flex;align-items:center;gap:10px;margin-top:8px}
+.limit-input-row input{max-width:100px;text-align:center}
 .qr-wrap{display:flex;flex-direction:column;align-items:center;gap:14px;padding:20px}
 .qr-wrap img{border-radius:var(--radius);background:#fff;padding:10px;width:220px;height:220px}
 .qr-placeholder{width:220px;height:220px;background:var(--surface2);border-radius:var(--radius);display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:12px;text-align:center;border:1px dashed var(--border);padding:16px}
@@ -83,6 +94,7 @@ tr:hover td{background:var(--surface2)}
 .dropzone{border:2px dashed var(--border);border-radius:var(--radius);padding:28px;text-align:center;color:var(--muted);cursor:pointer;transition:all .15s}
 .dropzone:hover{border-color:var(--primary);color:var(--primary)}
 .dropzone input{display:none}
+.countdown{font-size:22px;font-weight:700;color:var(--yellow);font-variant-numeric:tabular-nums}
 </style>
 </head>
 <body>
@@ -103,8 +115,9 @@ tr:hover td{background:var(--surface2)}
     <button class="nav-item" onclick="switchAccount(2);showPage('import',this)">📥 Importer CSV <span class="account-badge badge-a2">N°2</span></button>
     <button class="nav-item" onclick="switchAccount(2);showPage('connection',this)">📱 Connexion <span class="account-badge badge-a2" id="conn-badge-2">N°2</span></button>
 
-    <div class="nav-section">Vue globale</div>
+    <div class="nav-section">Autre</div>
     <button class="nav-item" onclick="showPage('overview',this)">👁 Vue d'ensemble</button>
+    <button class="nav-item" onclick="showPage('settings',this)">⚙️ Paramètres</button>
     <button class="nav-item" onclick="switchAccount(1);showPage('groups',this)">👥 Groupes</button>
   </aside>
 
@@ -116,12 +129,58 @@ tr:hover td{background:var(--surface2)}
         <h1 class="page-title" id="dash-title">Dashboard — Compte 1</h1>
         <div id="status-badge"></div>
       </div>
+
+      <!-- Stats -->
       <div class="grid-4">
         <div class="card"><div class="card-title">Envoyés</div><div class="stat-val green" id="stat-sent">0</div><div class="stat-label">messages envoyés</div></div>
         <div class="card"><div class="card-title">En attente</div><div class="stat-val yellow" id="stat-pending">0</div><div class="stat-label">dans la queue</div></div>
         <div class="card"><div class="card-title">Échecs</div><div class="stat-val red" id="stat-failed">0</div><div class="stat-label">erreurs / ignorés</div></div>
         <div class="card"><div class="card-title">Temps restant</div><div class="stat-val blue" id="stat-eta">—</div><div class="stat-label" id="stat-eta-label">en attente</div></div>
       </div>
+
+      <!-- Quota journalier -->
+      <div class="card" id="quota-card">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <div class="card-title" style="margin-bottom:0">Quota journalier (24h glissantes)</div>
+          <div id="quota-badge"></div>
+        </div>
+        <div style="display:flex;align-items:center;gap:16px">
+          <div style="flex:1">
+            <div class="quota-progress"><div class="quota-fill" id="quota-bar" style="width:0%"></div></div>
+            <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted)">
+              <span id="quota-count">0 / 300</span>
+              <span id="quota-pct">0%</span>
+            </div>
+          </div>
+          <div style="text-align:right;flex-shrink:0">
+            <div style="font-size:11px;color:var(--muted)">Reset dans</div>
+            <div class="countdown" id="quota-countdown">—</div>
+          </div>
+        </div>
+        <!-- Modifier la limite -->
+        <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border);display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <span style="font-size:12px;color:var(--muted)">Limite :</span>
+          <input type="number" id="limit-input" min="1" max="1000" value="300" style="max-width:80px;padding:5px 8px;text-align:center">
+          <button class="btn btn-ghost" style="padding:5px 12px;font-size:12px" onclick="setLimit()">Appliquer</button>
+          <span style="font-size:11px;color:var(--muted)">msgs / 24h par compte</span>
+          <span id="limit-saved" style="font-size:11px;color:var(--green);display:none">✓ Sauvegardé</span>
+        </div>
+      </div>
+
+      <!-- Alerte quota atteint -->
+      <div id="quota-alert" style="display:none">
+        <div class="quota-box">
+          <div class="quota-title">⏸ Quota atteint pour ce compte</div>
+          <div id="quota-alert-msg"></div>
+          <div class="quota-reset" id="quota-reset-info"></div>
+          <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
+            <button class="btn btn-primary" onclick="startBot()" title="Forcer le redémarrage maintenant">▶ Relancer maintenant</button>
+            <div id="auto-resume-badge"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Contrôle -->
       <div class="card">
         <div class="card-title">Contrôle du bot</div>
         <div class="btn-row" style="margin-bottom:12px">
@@ -138,6 +197,7 @@ tr:hover td{background:var(--surface2)}
         </div>
         <div class="eta-box" id="eta-box" style="display:none">⏱️ Fin estimée : <strong id="eta-finish">—</strong></div>
       </div>
+
       <div class="card"><div class="card-title">Journal</div><div class="log-wrap" id="log"></div></div>
     </div>
 
@@ -152,11 +212,9 @@ tr:hover td{background:var(--surface2)}
           <div class="msg-count" id="msg-count">0 caractères</div>
         </div>
         <div class="form-group">
-          <label>Lien à envoyer (optionnel — envoyé séparément après le texte)</label>
+          <label>Lien à envoyer (optionnel)</label>
           <input type="url" id="import-link" placeholder="https://ton-lien.com" oninput="updatePreview()">
-          <div class="link-info" id="link-info" style="display:none">
-            🔗 <span>Le lien sera envoyé dans un <strong>message séparé</strong>, avec un délai aléatoire de 8 à 15s après le texte. WhatsApp générera automatiquement l'aperçu cliquable.</span>
-          </div>
+          <div class="link-info" id="link-info" style="display:none">🔗 <span>Le lien sera envoyé dans un <strong>message séparé</strong>, avec délai aléatoire 8-15s.</span></div>
         </div>
         <div style="font-size:12px;color:var(--muted);margin-bottom:5px">👁 Aperçu :</div>
         <div class="msg-preview" id="msg-preview" style="color:var(--muted)">Votre message apparaîtra ici...</div>
@@ -164,7 +222,7 @@ tr:hover td{background:var(--surface2)}
       </div>
       <div class="card">
         <div class="card-title">Fichier CSV</div>
-        <p style="color:var(--muted);font-size:12px;margin-bottom:12px">Colonne requise : <strong>telephone</strong> — Colonnes optionnelles : <strong>message</strong>, <strong>link</strong></p>
+        <p style="color:var(--muted);font-size:12px;margin-bottom:12px">Colonne requise : <strong>telephone</strong> — Optionnelles : <strong>message</strong>, <strong>link</strong></p>
         <label class="dropzone" for="csv-file">
           <input type="file" id="csv-file" accept=".csv" onchange="importCSV()">
           <div id="dropzone-text">📄 Glissez votre CSV ou cliquez ici</div>
@@ -199,6 +257,43 @@ tr:hover td{background:var(--surface2)}
       </div>
     </div>
 
+    <!-- PARAMÈTRES -->
+    <div class="page" id="page-settings">
+      <h1 class="page-title">Paramètres</h1>
+      <div class="card">
+        <div class="card-title">Délais d'envoi</div>
+        <div class="grid-2">
+          <div class="form-group">
+            <label>Délai min entre messages (secondes)</label>
+            <input type="number" id="set-min-delay" min="10" max="600" value="90">
+          </div>
+          <div class="form-group">
+            <label>Délai max entre messages (secondes)</label>
+            <input type="number" id="set-max-delay" min="10" max="600" value="180">
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Taille de session (msgs avant pause longue)</label>
+          <input type="number" id="set-session-size" min="5" max="100" value="15">
+        </div>
+        <div class="form-group" style="flex-direction:row;align-items:center;gap:10px">
+          <input type="checkbox" id="set-auto-resume" style="width:auto" checked>
+          <label for="set-auto-resume" style="font-size:13px;color:var(--text);font-weight:400">Reprise automatique après reset du quota (24h)</label>
+        </div>
+        <button class="btn btn-primary" onclick="saveSettings()">💾 Sauvegarder</button>
+        <span id="settings-saved" style="font-size:12px;color:var(--green);margin-left:10px;display:none">✓ Sauvegardé</span>
+      </div>
+      <div class="card">
+        <div class="card-title">Informations quota</div>
+        <div style="color:var(--muted);font-size:13px;line-height:1.8">
+          <p>📌 La limite WhatsApp fonctionne sur une <strong style="color:var(--text)">fenêtre glissante de 24h</strong>.</p>
+          <p>⏰ Le quota se remet à zéro <strong style="color:var(--text)">exactement 24h après le 1er message envoyé</strong> de la session.</p>
+          <p>🔁 Avec la reprise automatique activée, le bot reprend tout seul à ce moment.</p>
+          <p>▶️ Ou vous pouvez cliquer <strong style="color:var(--text)">"Relancer maintenant"</strong> depuis le dashboard à tout moment.</p>
+        </div>
+      </div>
+    </div>
+
     <!-- VUE D'ENSEMBLE -->
     <div class="page" id="page-overview">
       <h1 class="page-title">Vue d'ensemble — 2 comptes</h1>
@@ -211,6 +306,8 @@ tr:hover td{background:var(--surface2)}
 const AVG = 82;
 let currentAccount = 1;
 let lastQr = {1:null,2:null};
+let countdownInterval = null;
+let lastStatus = null;
 
 function switchAccount(n) { currentAccount = n; }
 
@@ -225,14 +322,24 @@ function showPage(name, el) {
   if (name==='connection') document.getElementById('conn-title').textContent    = `Connexion — ${label}`;
   if (name==='groups')     loadGroups();
   if (name==='overview')   renderOverview();
+  if (name==='settings')   loadSettings();
 }
 
 function formatDuration(s) {
-  if (s<60) return Math.round(s)+'s';
+  if (s < 60)   return Math.round(s)+'s';
+  if (s < 3600) return Math.floor(s/60)+'min';
   const h=Math.floor(s/3600),m=Math.floor((s%3600)/60);
   return h>0?h+'h '+m+'min':m+'min';
 }
 function formatTime(d){ return d.toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'}); }
+function formatCountdown(ms) {
+  if (ms <= 0) return '0s';
+  const s = Math.floor(ms/1000);
+  const h = Math.floor(s/3600), m = Math.floor((s%3600)/60), ss = s%60;
+  if (h > 0) return `${h}h ${String(m).padStart(2,'0')}min`;
+  if (m > 0) return `${m}min ${String(ss).padStart(2,'0')}s`;
+  return `${ss}s`;
+}
 
 function updatePreview() {
   const msg  = document.getElementById('import-message').value;
@@ -246,27 +353,79 @@ function updatePreview() {
   if (link) {
     linkInfo.style.display='flex';
     linkWrap.innerHTML = `<div class="link-preview-box">🔗 <a href="${link}" target="_blank">${link}</a></div>`;
-  } else {
-    linkInfo.style.display='none';
-    linkWrap.innerHTML='';
-  }
+  } else { linkInfo.style.display='none'; linkWrap.innerHTML=''; }
 }
 
 function applyStatus(r) {
+  lastStatus = r;
   document.getElementById('stat-sent').textContent    = r.stats.sent;
   document.getElementById('stat-pending').textContent  = r.pending;
   document.getElementById('stat-failed').textContent   = r.stats.failed+r.stats.skipped;
   document.getElementById('status-badge').innerHTML    = r.ready
     ? '<span class="badge badge-green"><span class="dot"></span>Connecté</span>'
     : '<span class="badge badge-red"><span class="dot"></span>Déconnecté</span>';
+
+  // ── Quota bar ──────────────────────────────────────────────────────────
+  const pctQ = r.dailyLimit > 0 ? Math.min(100, Math.round(r.dailySent / r.dailyLimit * 100)) : 0;
+  document.getElementById('quota-count').textContent = `${r.dailySent} / ${r.dailyLimit}`;
+  document.getElementById('quota-pct').textContent   = pctQ + '%';
+  const bar = document.getElementById('quota-bar');
+  bar.style.width = pctQ + '%';
+  bar.className = 'quota-fill' + (pctQ >= 100 ? ' full' : pctQ >= 70 ? '' : ' ok');
+  document.getElementById('limit-input').value = r.dailyLimit;
+
+  // Badge quota
+  const qBadge = document.getElementById('quota-badge');
+  if (pctQ >= 100) qBadge.innerHTML = '<span class="badge badge-red">⛔ Quota atteint</span>';
+  else if (pctQ >= 70) qBadge.innerHTML = '<span class="badge badge-yellow">⚠️ Bientôt atteint</span>';
+  else qBadge.innerHTML = '<span class="badge badge-green">✓ OK</span>';
+
+  // Countdown reset quota
+  if (countdownInterval) clearInterval(countdownInterval);
+  if (r.windowStart && r.resetInMs > 0) {
+    const targetTs = Date.now() + r.resetInMs;
+    function tick() {
+      const left = targetTs - Date.now();
+      document.getElementById('quota-countdown').textContent = left > 0 ? formatCountdown(left) : '↻ Reset';
+    }
+    tick();
+    countdownInterval = setInterval(tick, 1000);
+  } else {
+    document.getElementById('quota-countdown').textContent = r.dailySent > 0 ? '24h' : '—';
+  }
+
+  // ── Alerte quota atteint ───────────────────────────────────────────────
+  const alertBox = document.getElementById('quota-alert');
+  if (r.limitReached) {
+    alertBox.style.display = 'block';
+    document.getElementById('quota-alert-msg').textContent = `${r.dailySent} messages envoyés — limite de ${r.dailyLimit} atteinte.`;
+    const resetInfo = document.getElementById('quota-reset-info');
+    if (r.resumeAt) {
+      const d = new Date(r.resumeAt);
+      resetInfo.textContent = `⏰ Reprise automatique prévue : ${formatTime(d)}${d.toDateString()===new Date().toDateString()?' auj.':', le '+d.toLocaleDateString('fr-FR')}`;
+    } else if (r.resetInMs > 0) {
+      resetInfo.textContent = `⏳ Quota se remet à 0 dans ${formatCountdown(r.resetInMs)}`;
+    } else {
+      resetInfo.textContent = 'Vous pouvez relancer manuellement dès maintenant.';
+    }
+    document.getElementById('auto-resume-badge').innerHTML = r.autoResume
+      ? '<span class="badge badge-blue">🔄 Reprise auto activée</span>'
+      : '<span class="badge badge-yellow">⚠️ Reprise auto désactivée</span>';
+  } else {
+    alertBox.style.display = 'none';
+  }
+
+  // ── Progress queue ─────────────────────────────────────────────────────
   const done=r.total-r.pending, pct=r.total>0?Math.round(done/r.total*100):0;
   document.getElementById('progress-bar').style.width  = pct+'%';
   document.getElementById('progress-label').textContent = done+' / '+r.total+' contacts traités';
   document.getElementById('progress-pct').textContent   = pct+'%';
   document.getElementById('btn-pause').textContent      = r.paused ? '▶ Reprendre' : '⏸ Pause';
+
   const wrap = document.getElementById('resume-box-wrap');
-  wrap.innerHTML = (r.pending>0 && !r.running && r.ready)
-    ? `<div class="resume-box">♻️ <strong>${r.pending} contacts en attente</strong> — cliquez Démarrer pour reprendre</div>` : '';
+  wrap.innerHTML = (r.pending>0 && !r.running && r.ready && !r.limitReached)
+    ? `<div style="background:color-mix(in oklch,var(--yellow) 8%,var(--surface2));border:1px solid color-mix(in oklch,var(--yellow) 25%,transparent);border-radius:var(--radius-sm);padding:9px 13px;font-size:12px;color:var(--yellow);display:flex;align-items:center;gap:8px;margin-bottom:8px">♻️ <strong>${r.pending} contacts en attente</strong> — cliquez Démarrer pour reprendre</div>` : '';
+
   const etaBox=document.getElementById('eta-box'),statEta=document.getElementById('stat-eta'),etaLabel=document.getElementById('stat-eta-label');
   if (r.pending>0&&r.running&&!r.paused) {
     const sec=r.pending*AVG,fin=new Date(Date.now()+sec*1000);
@@ -278,11 +437,12 @@ function applyStatus(r) {
   } else {
     statEta.textContent=r.total>0?'✅':'—';etaLabel.textContent=r.total>0?'terminé':'aucun contact';etaBox.style.display='none';
   }
+
   updateQR(r.qr, r.ready, currentAccount);
-  // Mise à jour badge connexion sidebar
   const b1=document.getElementById('conn-badge-1'),b2=document.getElementById('conn-badge-2');
   if (r.id===1&&b1) b1.textContent=r.ready?'✅':'N°1';
   if (r.id===2&&b2) b2.textContent=r.ready?'✅':'N°2';
+
   document.getElementById('log').innerHTML = r.log.map(l=>{
     const t=new Date(l.time).toLocaleTimeString('fr-FR');
     return `<div class="log-item"><span class="log-time">${t}</span><span class="log-${l.type}">${l.msg}</span></div>`;
@@ -302,11 +462,45 @@ async function fetchStatus() {
     const r=await fetch(`/api/${currentAccount}/status`).then(r=>r.json());
     if (document.getElementById('page-dashboard').classList.contains('active')||
         document.getElementById('page-connection').classList.contains('active')) applyStatus(r);
-    // Mise à jour badges sidebar en arrière-plan
     const b1=document.getElementById('conn-badge-1'),b2=document.getElementById('conn-badge-2');
     if (currentAccount===1&&b1) b1.textContent=r.ready?'✅':'N°1';
     if (currentAccount===2&&b2) b2.textContent=r.ready?'✅':'N°2';
   } catch(e){}
+}
+
+async function setLimit() {
+  const limit = parseInt(document.getElementById('limit-input').value);
+  if (!limit || limit < 1 || limit > 1000) return alert('Entrez une valeur entre 1 et 1000');
+  const r = await fetch(`/api/${currentAccount}/set-limit`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ limit }) }).then(r=>r.json());
+  if (r.ok) {
+    const el = document.getElementById('limit-saved');
+    el.style.display = 'inline';
+    setTimeout(() => el.style.display='none', 2000);
+  }
+}
+
+async function loadSettings() {
+  try {
+    const cfg = await fetch('/api/config').then(r=>r.json());
+    document.getElementById('set-min-delay').value    = cfg.minDelay  || 90;
+    document.getElementById('set-max-delay').value    = cfg.maxDelay  || 180;
+    document.getElementById('set-session-size').value = cfg.sessionSize|| 15;
+    document.getElementById('set-auto-resume').checked= cfg.autoResume !== false;
+  } catch(e){}
+}
+
+async function saveSettings() {
+  const body = {
+    minDelay:    parseInt(document.getElementById('set-min-delay').value),
+    maxDelay:    parseInt(document.getElementById('set-max-delay').value),
+    sessionSize: parseInt(document.getElementById('set-session-size').value),
+    autoResume:  document.getElementById('set-auto-resume').checked
+  };
+  const r = await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(r=>r.json());
+  if (r.ok) {
+    const el = document.getElementById('settings-saved');
+    el.style.display='inline'; setTimeout(()=>el.style.display='none',2500);
+  }
 }
 
 async function renderOverview() {
@@ -317,14 +511,16 @@ async function renderOverview() {
     if(!r) return `<div class="card"><div class="card-title">Compte ${i+1}</div><span class="badge badge-red">Hors ligne</span></div>`;
     const color=i===0?'var(--primary)':'var(--blue)';
     const pct=r.total>0?Math.round((r.total-r.pending)/r.total*100):0;
+    const pctQ=r.dailyLimit>0?Math.min(100,Math.round(r.dailySent/r.dailyLimit*100)):0;
     return `<div class="card"><div class="card-title" style="color:${color}">Compte ${i+1}</div>
       <div style="display:flex;gap:20px;margin-bottom:12px">
         <div><div class="stat-val green" style="font-size:22px">${r.stats.sent}</div><div class="stat-label">envoyés</div></div>
         <div><div class="stat-val yellow" style="font-size:22px">${r.pending}</div><div class="stat-label">en attente</div></div>
         <div><div class="stat-val" style="font-size:22px;color:${color}">${pct}%</div><div class="stat-label">complété</div></div>
       </div>
-      <div class="progress"><div class="progress-fill" style="width:${pct}%;background:${color}"></div></div>
-      <div style="font-size:11px;color:var(--muted);margin-top:5px">${r.ready?'🟢 Connecté':'🔴 Déconnecté'} · ${r.running&&!r.paused?'▶ En cours':r.paused?'⏸ Pause':'⏹ Arrêté'}</div>
+      <div style="font-size:12px;color:var(--muted);margin-bottom:4px">Quota : ${r.dailySent}/${r.dailyLimit} (${pctQ}%)</div>
+      <div class="quota-progress"><div class="quota-fill ${pctQ>=100?'full':pctQ>=70?'':'ok'}" style="width:${pctQ}%"></div></div>
+      <div style="font-size:11px;color:var(--muted);margin-top:5px">${r.ready?'🟢 Connecté':'🔴 Déconnecté'} · ${r.running&&!r.paused?'▶ En cours':r.paused?'⏸ Pause':r.limitReached?'⛔ Quota':'⏹ Arrêté'}${r.resetInMs>0?' · Reset dans '+formatCountdown(r.resetInMs):''}</div>
     </div>`;
   }).join('');
 }
@@ -352,12 +548,12 @@ async function importCSV() {
 async function loadGroups() {
   const groups=await fetch(`/api/${currentAccount}/groups`).then(r=>r.json());
   const tbody=document.getElementById('groups-table');
-  if(!groups.length){tbody.innerHTML='<tr><td colspan="3" style="color:var(--muted);text-align:center;padding:20px">Aucun groupe (connectez WhatsApp d\'abord)</td></tr>';return;}
+  if(!groups.length){tbody.innerHTML='<tr><td colspan="3" style="color:var(--muted);text-align:center;padding:20px">Aucun groupe</td></tr>';return;}
   tbody.innerHTML=groups.map(g=>`<tr><td><strong>${g.name}</strong></td><td>${g.count}</td><td><a href="/api/${currentAccount}/export-group/${encodeURIComponent(g.name)}" class="btn btn-ghost" style="padding:5px 11px;font-size:12px">Exporter</a></td></tr>`).join('');
 }
 
 fetchStatus();
-setInterval(fetchStatus,2000);
+setInterval(fetchStatus, 2000);
 </script>
 </body>
 </html>

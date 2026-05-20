@@ -13,18 +13,30 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 const upload = multer({ dest: 'uploads/' });
 
-// ─── Paramètres ─────────────────────────────────────────────────────────────
-const MIN_DELAY_S       = parseInt(process.env.MIN_DELAY_S       || '90');
-const MAX_DELAY_S       = parseInt(process.env.MAX_DELAY_S       || '180');
-const SESSION_SIZE      = parseInt(process.env.SESSION_SIZE      || '15');
-const SESSION_PAUSE_MIN = parseInt(process.env.SESSION_PAUSE_MIN || '600');
-const SESSION_PAUSE_MAX = parseInt(process.env.SESSION_PAUSE_MAX || '1200');
-const TYPING_MIN_MS     = parseInt(process.env.TYPING_MIN_MS     || '2000');
-const TYPING_MAX_MS     = parseInt(process.env.TYPING_MAX_MS     || '6000');
-const LINK_DELAY_MIN_MS = parseInt(process.env.LINK_DELAY_MIN_MS || '8000');
-const LINK_DELAY_MAX_MS = parseInt(process.env.LINK_DELAY_MAX_MS || '15000');
-// Limite journalière avant relais vers l'autre compte
-const DAILY_LIMIT       = parseInt(process.env.DAILY_LIMIT       || '300');
+// ─── Config par défaut (surchargeable via env ou dashboard) ────────────────
+let config = {
+  minDelay:       parseInt(process.env.MIN_DELAY_S       || '90'),
+  maxDelay:       parseInt(process.env.MAX_DELAY_S       || '180'),
+  sessionSize:    parseInt(process.env.SESSION_SIZE      || '15'),
+  sessionPauseMin:parseInt(process.env.SESSION_PAUSE_MIN || '600'),
+  sessionPauseMax:parseInt(process.env.SESSION_PAUSE_MAX || '1200'),
+  typingMin:      parseInt(process.env.TYPING_MIN_MS     || '2000'),
+  typingMax:      parseInt(process.env.TYPING_MAX_MS     || '6000'),
+  linkDelayMin:   parseInt(process.env.LINK_DELAY_MIN_MS || '8000'),
+  linkDelayMax:   parseInt(process.env.LINK_DELAY_MAX_MS || '15000'),
+  // Limite par compte — modifiable via le dashboard
+  dailyLimit:     { 1: parseInt(process.env.DAILY_LIMIT || '300'), 2: parseInt(process.env.DAILY_LIMIT || '300') },
+  autoResume:     true   // reprise automatique après reset quota
+};
+const CONFIG_FILE = path.join(__dirname, 'data', 'config.json');
+if (fs.existsSync(CONFIG_FILE)) {
+  try { const saved = JSON.parse(fs.readFileSync(CONFIG_FILE,'utf-8')); Object.assign(config, saved); } catch(e) {}
+}
+function saveConfig() {
+  const dir = path.dirname(CONFIG_FILE);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
+}
 
 const rand  = (a, b) => a + Math.random() * (b - a);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -51,7 +63,7 @@ function removeLocks(dir) {
   } catch(e) {}
 }
 
-// ─── BotAccount ──────────────────────────────────────────────────────────────
+// ─── BotAccount ─────────────────────────────────────────────────────────────
 class BotAccount {
   constructor(id) {
     this.id         = id;
@@ -59,9 +71,16 @@ class BotAccount {
     this.dataFile   = path.join(__dirname, 'data', `queue_${id}.json`);
     this.client     = null;
     this.retryCount = 0;
+    this._resumeTimer = null;
     this.state = {
       qr: null, ready: false, running: false, paused: false,
-      queue: [], sessionCount: 0, dailySent: 0, dailyDate: '',
+      queue: [], sessionCount: 0,
+      dailySent: 0, dailyDate: '',
+      // quota 24h glissant : timestamp du PREMIER envoi de la période
+      windowStart: null,
+      limitReached: false,
+      limitReachedAt: null,
+      resumeAt: null,       // timestamp prévu de reprise
       log: [], stats: { sent: 0, failed: 0, skipped: 0 }
     };
     this._loadQueue();
@@ -69,17 +88,23 @@ class BotAccount {
     this._initClient();
   }
 
+  get dailyLimit() { return config.dailyLimit[this.id] || 300; }
+
   _loadQueue() {
     if (fs.existsSync(this.dataFile)) {
       try {
         const data = JSON.parse(fs.readFileSync(this.dataFile, 'utf-8'));
-        this.state.queue        = data.queue        || [];
-        this.state.stats        = data.stats        || { sent: 0, failed: 0, skipped: 0 };
-        this.state.sessionCount = data.sessionCount || 0;
-        this.state.dailySent    = data.dailySent    || 0;
-        this.state.dailyDate    = data.dailyDate    || '';
-        const today = new Date().toISOString().slice(0,10);
-        if (this.state.dailyDate !== today) { this.state.dailySent = 0; this.state.dailyDate = today; }
+        this.state.queue         = data.queue         || [];
+        this.state.stats         = data.stats         || { sent: 0, failed: 0, skipped: 0 };
+        this.state.sessionCount  = data.sessionCount  || 0;
+        this.state.dailySent     = data.dailySent     || 0;
+        this.state.dailyDate     = data.dailyDate     || '';
+        this.state.windowStart   = data.windowStart   || null;
+        this.state.limitReached  = data.limitReached  || false;
+        this.state.limitReachedAt= data.limitReachedAt|| null;
+        this.state.resumeAt      = data.resumeAt      || null;
+        // Vérifier si la fenêtre 24h est passée
+        this._checkWindowReset();
         const pending = this.state.queue.filter(c => c.status === 'pending').length;
         if (pending) this.log(`💾 Queue restaurée : ${pending} contacts en attente`, 'warn');
       } catch(e) { this.log(`Erreur chargement queue : ${e.message}`, 'error'); }
@@ -93,6 +118,10 @@ class BotAccount {
       queue: this.state.queue, stats: this.state.stats,
       sessionCount: this.state.sessionCount,
       dailySent: this.state.dailySent, dailyDate: this.state.dailyDate,
+      windowStart: this.state.windowStart,
+      limitReached: this.state.limitReached,
+      limitReachedAt: this.state.limitReachedAt,
+      resumeAt: this.state.resumeAt,
       savedAt: new Date().toISOString()
     }, null, 2));
   }
@@ -110,11 +139,57 @@ class BotAccount {
     if (fixed > 0) { this.log(`♻️ ${fixed} contacts remis en attente après crash`, 'warn'); this._saveQueue(); }
   }
 
-  // ── Vérifie si la limite journalière est atteinte ──────────────────────────
+  // ── Fenêtre glissante de 24h ──────────────────────────────────────────────
+  // La limite se remet à 0 exactement 24h après le PREMIER message envoyé
+  _checkWindowReset() {
+    if (!this.state.windowStart) return;
+    const elapsed = Date.now() - new Date(this.state.windowStart).getTime();
+    if (elapsed >= 24 * 3600 * 1000) {
+      this.state.dailySent    = 0;
+      this.state.windowStart  = null;
+      this.state.limitReached = false;
+      this.state.limitReachedAt = null;
+      this.state.resumeAt     = null;
+      if (this._resumeTimer) { clearTimeout(this._resumeTimer); this._resumeTimer = null; }
+      this.log('🔄 Quota réinitialisé (24h écoulées)', 'success');
+      this._saveQueue();
+      return true;
+    }
+    return false;
+  }
+
+  _windowResetIn() {
+    // Retourne le nb de ms avant réinitialisation du quota
+    if (!this.state.windowStart) return 0;
+    const elapsed = Date.now() - new Date(this.state.windowStart).getTime();
+    return Math.max(0, 24 * 3600 * 1000 - elapsed);
+  }
+
+  _scheduleAutoResume(relayBot) {
+    if (this._resumeTimer) clearTimeout(this._resumeTimer);
+    const ms = this._windowResetIn();
+    if (ms <= 0) return;
+    this.state.resumeAt = new Date(Date.now() + ms).toISOString();
+    this._saveQueue();
+    this.log(`⏰ Reprise automatique prévue dans ${Math.round(ms/3600000*10)/10}h`, 'warn');
+    this._resumeTimer = setTimeout(() => {
+      this._checkWindowReset();
+      if (this.state.ready && !this.state.running && this.state.queue.some(c => c.status === 'pending')) {
+        this.log('▶️ Reprise automatique après reset quota', 'success');
+        this.runQueue(relayBot);
+      }
+    }, ms);
+  }
+
+  _recordFirstSend() {
+    if (!this.state.windowStart) {
+      this.state.windowStart = new Date().toISOString();
+    }
+  }
+
   _dailyLimitReached() {
-    const today = new Date().toISOString().slice(0,10);
-    if (this.state.dailyDate !== today) { this.state.dailySent = 0; this.state.dailyDate = today; }
-    return this.state.dailySent >= DAILY_LIMIT;
+    this._checkWindowReset();
+    return this.state.dailySent >= this.dailyLimit;
   }
 
   _makeClient() {
@@ -146,7 +221,7 @@ class BotAccount {
       this.state.ready = true; this.state.qr = null;
       this.log('WhatsApp connecté ✅', 'success');
       const pending = this.state.queue.filter(c => c.status === 'pending').length;
-      if (pending > 0 && !this.state.running) {
+      if (pending > 0 && !this.state.running && !this._dailyLimitReached()) {
         this.log(`▶️ Reprise automatique : ${pending} contacts restants`, 'warn');
         this.runQueue();
       }
@@ -181,17 +256,17 @@ class BotAccount {
   }
 
   async _delayMsg() {
-    const ms = rand(MIN_DELAY_S, MAX_DELAY_S) * 1000;
+    const ms = rand(config.minDelay, config.maxDelay) * 1000;
     this.log(`⏳ Pause : ${(ms/1000).toFixed(0)}s`, 'info');
     await sleep(ms);
   }
   async _delaySession() {
-    const ms = rand(SESSION_PAUSE_MIN, SESSION_PAUSE_MAX) * 1000;
+    const ms = rand(config.sessionPauseMin, config.sessionPauseMax) * 1000;
     this.log(`☕ Pause session : ${(ms/60000).toFixed(0)}min`, 'warn');
     await sleep(ms);
   }
   async _typing(chat) {
-    try { await chat.sendStateTyping(); await sleep(rand(TYPING_MIN_MS, TYPING_MAX_MS)); await chat.clearState(); } catch(e) {}
+    try { await chat.sendStateTyping(); await sleep(rand(config.typingMin, config.typingMax)); await chat.clearState(); } catch(e) {}
   }
 
   async _sendMessage(chatId, rawMsg, link) {
@@ -199,7 +274,7 @@ class BotAccount {
     if (link && link.trim()) {
       await this._typing(chat);
       await this.client.sendMessage(chatId, rawMsg.trim());
-      const delay = rand(LINK_DELAY_MIN_MS, LINK_DELAY_MAX_MS);
+      const delay = rand(config.linkDelayMin, config.linkDelayMax);
       this.log(`⏱ Délai avant lien : ${(delay/1000).toFixed(1)}s`, 'info');
       await sleep(delay);
       await this.client.sendMessage(chatId, link.trim());
@@ -208,7 +283,7 @@ class BotAccount {
       if (parts && parts.text) {
         await this._typing(chat);
         await this.client.sendMessage(chatId, parts.text);
-        const delay = rand(LINK_DELAY_MIN_MS, LINK_DELAY_MAX_MS);
+        const delay = rand(config.linkDelayMin, config.linkDelayMax);
         await sleep(delay);
         await this.client.sendMessage(chatId, parts.url);
       } else {
@@ -218,45 +293,46 @@ class BotAccount {
     }
   }
 
-  // ── Queue principale ───────────────────────────────────────────────────────
-  // relayBot : l'autre BotAccount vers lequel relayer si limite atteinte
+  // ── Queue principale ──────────────────────────────────────────────────────
   async runQueue(relayBot) {
     if (this.state.running) return;
     this.state.running = true;
-    this.log(`🚀 Bot démarré (session ≤${SESSION_SIZE} msgs, limite/jour : ${DAILY_LIMIT})`, 'success');
+    this.state.limitReached = false;
+    this.log(`🚀 Bot démarré (session ≤${config.sessionSize} msgs, limite/jour : ${this.dailyLimit})`, 'success');
 
     while (this.state.queue.some(c => c.status === 'pending')) {
       if (!this.state.ready) { await sleep(10000); continue; }
       if (this.state.paused)  { await sleep(3000);  continue; }
 
-      // ── Limite journalière atteinte → relais ──────────────────────────────
+      // ── Quota 24h atteint ────────────────────────────────────────────────
       if (this._dailyLimitReached()) {
         this.state.running = false;
+        this.state.limitReached = true;
+        this.state.limitReachedAt = new Date().toISOString();
         const remaining = this.state.queue.filter(c => c.status === 'pending');
+        const resetIn = this._windowResetIn();
+
         if (relayBot && relayBot.state.ready && remaining.length > 0) {
-          this.log(`🔁 Limite ${DAILY_LIMIT} msgs atteinte → relais vers Compte ${relayBot.id} (${remaining.length} contacts)`, 'warn');
-          // Copier les contacts restants dans la queue de l'autre bot
+          // Relais vers l'autre compte
+          this.log(`🔁 Limite ${this.dailyLimit} msgs atteinte → relais vers Compte ${relayBot.id} (${remaining.length} contacts)`, 'warn');
           for (const c of remaining) {
-            const alreadyThere = relayBot.state.queue.find(x => x.phone === c.phone && x.status === 'pending');
-            if (!alreadyThere) {
-              relayBot.state.queue.push({ ...c, status: 'pending', relayedFrom: this.id, relayedAt: new Date().toISOString() });
-            }
+            const already = relayBot.state.queue.find(x => x.phone === c.phone && x.status === 'pending');
+            if (!already) relayBot.state.queue.push({ ...c, status: 'pending', relayedFrom: this.id, relayedAt: new Date().toISOString() });
             c.status = 'relayed';
           }
-          this._saveQueue();
-          relayBot._saveQueue();
-          if (!relayBot.state.running) {
-            this.log(`▶️ Démarrage automatique du Compte ${relayBot.id}`, 'success');
-            relayBot.runQueue(this);
-          }
-        } else if (remaining.length > 0) {
-          this.log(`⚠️ Limite ${DAILY_LIMIT} msgs atteinte. Compte ${relayBot ? relayBot.id : '?'} non connecté — en attente.`, 'warn');
+          this._saveQueue(); relayBot._saveQueue();
+          if (!relayBot.state.running) { this.log(`▶️ Démarrage automatique du Compte ${relayBot.id}`, 'success'); relayBot.runQueue(this); }
+        } else {
+          // Pas de relais : planifier reprise auto dans 24h
+          this.log(`⏸ Limite ${this.dailyLimit} atteinte. Quota reset dans ${Math.round(resetIn/3600000*10)/10}h`, 'warn');
+          if (config.autoResume) this._scheduleAutoResume(relayBot);
         }
+        this._saveQueue();
         break;
       }
 
-      if (this.state.sessionCount > 0 && this.state.sessionCount % SESSION_SIZE === 0) {
-        this.log(`📊 Session ${Math.floor(this.state.sessionCount/SESSION_SIZE)} terminée`, 'info');
+      if (this.state.sessionCount > 0 && this.state.sessionCount % config.sessionSize === 0) {
+        this.log(`📊 Session ${Math.floor(this.state.sessionCount/config.sessionSize)} terminée`, 'info');
         await this._delaySession();
       }
 
@@ -277,12 +353,13 @@ class BotAccount {
         await sleep(rand(500, 2000));
         const msg  = (contact.message || '').trim() || process.env.DEFAULT_MESSAGE || 'Bonjour ! 👋';
         const link = (contact.link    || '').trim();
+        this._recordFirstSend();
         await this._sendMessage(chatId, msg, link);
         contact.status = 'done';
         this.state.stats.sent++;
         this.state.sessionCount++;
         this.state.dailySent++;
-        this.log(`✅ Envoyé à +${number}${link ? ' 🔗' : ''} [${this.state.dailySent}/${DAILY_LIMIT}]`, 'success');
+        this.log(`✅ Envoyé à +${number}${link ? ' 🔗' : ''} [${this.state.dailySent}/${this.dailyLimit}]`, 'success');
         this._saveQueue();
         await this._delayMsg();
       } catch(err) {
@@ -292,7 +369,8 @@ class BotAccount {
       }
     }
     this.state.running = false;
-    this.log('🏁 Queue terminée', 'success');
+    const stillPending = this.state.queue.some(c => c.status === 'pending');
+    if (!stillPending) this.log('🏁 Queue terminée', 'success');
     this._saveQueue();
   }
 
@@ -317,6 +395,8 @@ class BotAccount {
   }
 
   getStatus() {
+    this._checkWindowReset();
+    const resetInMs = this._windowResetIn();
     return {
       id: this.id, ready: this.state.ready, qr: this.state.qr,
       running: this.state.running, paused: this.state.paused,
@@ -325,8 +405,15 @@ class BotAccount {
       relayed:  this.state.queue.filter(c => c.status === 'relayed').length,
       total:    this.state.queue.length,
       sessionCount: this.state.sessionCount,
-      dailySent: this.state.dailySent, dailyLimit: DAILY_LIMIT,
-      minDelay: MIN_DELAY_S, maxDelay: MAX_DELAY_S, sessionSize: SESSION_SIZE,
+      dailySent: this.state.dailySent,
+      dailyLimit: this.dailyLimit,
+      limitReached: this.state.limitReached,
+      limitReachedAt: this.state.limitReachedAt,
+      resumeAt: this.state.resumeAt,
+      windowStart: this.state.windowStart,
+      resetInMs,
+      autoResume: config.autoResume,
+      minDelay: config.minDelay, maxDelay: config.maxDelay, sessionSize: config.sessionSize,
       log: this.state.log.slice(0, 50)
     };
   }
@@ -335,12 +422,18 @@ class BotAccount {
     this.state.queue.forEach(c => { if (c.status !== 'done') c.status = 'pending'; });
     this.state.stats = { sent: 0, failed: 0, skipped: 0 };
     this.state.sessionCount = 0; this.state.dailySent = 0;
+    this.state.windowStart = null; this.state.limitReached = false;
+    this.state.limitReachedAt = null; this.state.resumeAt = null;
+    if (this._resumeTimer) { clearTimeout(this._resumeTimer); this._resumeTimer = null; }
     this._saveQueue(); this.log('🔄 Queue réinitialisée', 'warn');
   }
 
   clear() {
     this.state.queue = []; this.state.stats = { sent: 0, failed: 0, skipped: 0 };
     this.state.sessionCount = 0; this.state.dailySent = 0;
+    this.state.windowStart = null; this.state.limitReached = false;
+    this.state.limitReachedAt = null; this.state.resumeAt = null;
+    if (this._resumeTimer) { clearTimeout(this._resumeTimer); this._resumeTimer = null; }
     this._saveQueue(); this.log('🗑️ Queue vidée', 'warn');
   }
 }
@@ -355,13 +448,33 @@ app.get('/api/:account/status',  (req, res) => res.json(getBot(req).getStatus())
 app.post('/api/:account/start',  (req, res) => {
   const b = getBot(req);
   if (!b.state.ready) return res.status(400).json({ ok: false, error: 'Non connecté' });
-  b.state.paused = false;
+  b.state.paused = false; b.state.limitReached = false;
   b.runQueue(otherBot(b));
   res.json({ ok: true });
 });
 app.post('/api/:account/pause',  (req, res) => { const b=getBot(req); b.state.paused=!b.state.paused; b.log(b.state.paused?'⏸️ Pause':'▶️ Reprise','warn'); res.json({ok:true,paused:b.state.paused}); });
 app.post('/api/:account/clear',  (req, res) => { getBot(req).clear(); res.json({ok:true}); });
 app.post('/api/:account/reset',  (req, res) => { getBot(req).reset(); res.json({ok:true}); });
+
+// ── Mise à jour de la limite depuis le dashboard ──────────────────────────
+app.post('/api/:account/set-limit', (req, res) => {
+  const b = getBot(req);
+  const limit = parseInt(req.body.limit);
+  if (!limit || limit < 1 || limit > 1000) return res.status(400).json({ ok: false, error: 'Limite invalide (1-1000)' });
+  config.dailyLimit[b.id] = limit;
+  saveConfig();
+  b.log(`⚙️ Limite modifiée → ${limit} msgs/24h`, 'warn');
+  res.json({ ok: true, limit });
+});
+
+// ── Config globale ────────────────────────────────────────────────────────
+app.get('/api/config', (req, res) => res.json(config));
+app.post('/api/config', (req, res) => {
+  const allowed = ['minDelay','maxDelay','sessionSize','autoResume'];
+  for (const k of allowed) if (req.body[k] !== undefined) config[k] = req.body[k];
+  saveConfig();
+  res.json({ ok: true, config });
+});
 
 app.get('/api/:account/export', (req, res) => {
   const bot = getBot(req);
