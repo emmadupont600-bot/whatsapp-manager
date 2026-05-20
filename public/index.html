@@ -30,10 +30,11 @@ body { font-family: var(--font); background: var(--bg); color: var(--text); min-
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; }
 .card-title { font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; margin-bottom: 12px; }
 .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+.grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
 .grid-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }
 .stat-val { font-size: 32px; font-weight: 700; line-height: 1; }
 .stat-label { font-size: 12px; color: var(--muted); margin-top: 4px; }
-.green { color: var(--green); } .red { color: var(--red); } .yellow { color: var(--yellow); }
+.green { color: var(--green); } .red { color: var(--red); } .yellow { color: var(--yellow); } .blue { color: #60a5fa; }
 .badge { display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 99px; font-size: 11px; font-weight: 600; }
 .badge-green { background: color-mix(in oklch, var(--green) 15%, transparent); color: var(--green); }
 .badge-red { background: color-mix(in oklch, var(--red) 15%, transparent); color: var(--red); }
@@ -51,6 +52,8 @@ textarea { background: var(--surface2); border: 1px solid var(--border); color: 
 textarea:focus { border-color: var(--primary); }
 .msg-preview { background: color-mix(in oklch, var(--primary) 8%, var(--surface2)); border: 1px solid color-mix(in oklch, var(--primary) 30%, transparent); border-radius: var(--radius-sm); padding: 12px 14px; font-size: 13px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; color: var(--text); margin-top: 8px; }
 .msg-count { font-size: 11px; color: var(--muted); margin-top: 4px; text-align: right; }
+.eta-box { background: color-mix(in oklch, #60a5fa 8%, var(--surface2)); border: 1px solid color-mix(in oklch, #60a5fa 25%, transparent); border-radius: var(--radius-sm); padding: 10px 14px; font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.eta-box strong { color: #60a5fa; font-size: 14px; }
 .qr-wrap { display: flex; flex-direction: column; align-items: center; gap: 16px; padding: 24px; }
 .qr-wrap img { border-radius: var(--radius); background: #fff; padding: 12px; width: 240px; height: 240px; }
 .qr-placeholder { width: 240px; height: 240px; background: var(--surface2); border-radius: var(--radius); display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 12px; text-align: center; border: 1px dashed var(--border); padding: 16px; }
@@ -70,6 +73,7 @@ tr:last-child td { border-bottom: none; }
 tr:hover td { background: var(--surface2); }
 .progress { height: 6px; background: var(--surface2); border-radius: 99px; overflow: hidden; margin-top: 8px; }
 .progress-fill { height: 100%; background: var(--primary); border-radius: 99px; transition: width .4s; }
+.progress-row { display: flex; justify-content: space-between; align-items: center; margin-top: 6px; }
 .page-header { display: flex; align-items: center; justify-content: space-between; }
 .page-title { font-size: 20px; font-weight: 700; }
 .dropzone { border: 2px dashed var(--border); border-radius: var(--radius); padding: 32px; text-align: center; color: var(--muted); cursor: pointer; transition: all .15s; }
@@ -93,21 +97,28 @@ tr:hover td { background: var(--surface2); }
   <main class="main">
     <div class="page active" id="page-dashboard">
       <div class="page-header"><h1 class="page-title">Dashboard</h1><div id="status-badge"></div></div>
-      <div class="grid-3">
-        <div class="card"><div class="card-title">Envoyes</div><div class="stat-val green" id="stat-sent">0</div><div class="stat-label">messages envoyes</div></div>
+      <div class="grid-4">
+        <div class="card"><div class="card-title">Envoyés</div><div class="stat-val green" id="stat-sent">0</div><div class="stat-label">messages envoyés</div></div>
         <div class="card"><div class="card-title">En attente</div><div class="stat-val yellow" id="stat-pending">0</div><div class="stat-label">dans la queue</div></div>
-        <div class="card"><div class="card-title">Echecs</div><div class="stat-val red" id="stat-failed">0</div><div class="stat-label">erreurs / ignores</div></div>
+        <div class="card"><div class="card-title">Échecs</div><div class="stat-val red" id="stat-failed">0</div><div class="stat-label">erreurs / ignorés</div></div>
+        <div class="card"><div class="card-title">Temps restant</div><div class="stat-val blue" id="stat-eta">—</div><div class="stat-label" id="stat-eta-label">en attente</div></div>
       </div>
       <div class="card">
-        <div class="card-title">Controle du bot</div>
+        <div class="card-title">Contrôle du bot</div>
         <div class="btn-row" style="margin-bottom:14px">
-          <button class="btn btn-primary" onclick="startBot()">&#9654; Demarrer</button>
+          <button class="btn btn-primary" onclick="startBot()">&#9654; Démarrer</button>
           <button class="btn btn-ghost" onclick="pauseBot()" id="btn-pause">&#9208; Pause</button>
           <button class="btn btn-ghost" onclick="exportCSV()">&#11015; Exporter CSV</button>
           <button class="btn btn-danger" onclick="clearQueue()">&#128465; Vider la queue</button>
         </div>
         <div class="progress"><div class="progress-fill" id="progress-bar" style="width:0%"></div></div>
-        <div style="font-size:11px;color:var(--muted);margin-top:5px" id="progress-label">0 / 0 contacts traites</div>
+        <div class="progress-row">
+          <span style="font-size:11px;color:var(--muted)" id="progress-label">0 / 0 contacts traités</span>
+          <span style="font-size:11px;color:var(--muted)" id="progress-pct">0%</span>
+        </div>
+        <div class="eta-box" id="eta-box" style="display:none">
+          ⏱️ Fin estimée : <strong id="eta-finish">—</strong>&nbsp;&nbsp;·&nbsp;&nbsp;Délai anti-ban : <strong>45–120s</strong> par contact
+        </div>
       </div>
       <div class="card"><div class="card-title">Journal</div><div class="log-wrap" id="log"></div></div>
     </div>
@@ -115,13 +126,13 @@ tr:hover td { background: var(--surface2); }
     <div class="page" id="page-import">
       <h1 class="page-title">Importer des contacts</h1>
       <div class="card">
-        <div class="card-title">Message envoye a chaque contact</div>
+        <div class="card-title">Message envoyé à chaque contact</div>
         <div class="form-group">
-          <textarea id="import-message" placeholder="Ecrivez votre message ici..." oninput="updatePreview()"></textarea>
-          <div class="msg-count" id="msg-count">0 caracteres</div>
+          <textarea id="import-message" placeholder="Écrivez votre message ici..." oninput="updatePreview()"></textarea>
+          <div class="msg-count" id="msg-count">0 caractères</div>
         </div>
-        <div style="font-size:12px;color:var(--muted);margin-bottom:6px">&#128065; Apercu WhatsApp :</div>
-        <div class="msg-preview" id="msg-preview" style="color:var(--muted)">Votre message apparaitra ici...</div>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:6px">&#128065; Aperçu WhatsApp :</div>
+        <div class="msg-preview" id="msg-preview" style="color:var(--muted)">Votre message apparaîtra ici...</div>
       </div>
       <div class="card">
         <div class="card-title">Fichier CSV</div>
@@ -145,16 +156,30 @@ tr:hover td { background: var(--surface2); }
         <div class="card">
           <div class="card-title">QR Code</div>
           <div class="qr-wrap" id="qr-wrap">
-            <div class="qr-placeholder">&#8987; Generation du QR code...<br><small style="margin-top:8px;display:block">Patientez ~30 secondes</small></div>
+            <div class="qr-placeholder">&#8987; Génération du QR code...<br><small style="margin-top:8px;display:block">Patientez ~30 secondes</small></div>
           </div>
         </div>
-        <div class="card"><div class="card-title">Instructions</div><ol style="color:var(--muted);font-size:13px;line-height:2;padding-left:18px"><li>Ouvrez WhatsApp sur votre telephone</li><li>Reglages &#8594; Appareils connectes</li><li>Connecter un appareil</li><li>Scannez le QR code</li><li>Connexion automatique &#10003;</li></ol></div>
+        <div class="card"><div class="card-title">Instructions</div><ol style="color:var(--muted);font-size:13px;line-height:2;padding-left:18px"><li>Ouvrez WhatsApp sur votre téléphone</li><li>Réglages → Appareils connectés</li><li>Connecter un appareil</li><li>Scannez le QR code</li><li>Connexion automatique ✅</li></ol></div>
       </div>
     </div>
   </main>
 </div>
 <script>
 let lastQr = null;
+const MIN_DELAY_S = 45, MAX_DELAY_S = 120;
+const AVG_DELAY_S = (MIN_DELAY_S + MAX_DELAY_S) / 2; // ~82s par contact
+
+function formatDuration(seconds) {
+  if (seconds < 60) return Math.round(seconds) + 's';
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  if (h > 0) return h + 'h ' + m + 'min';
+  return m + 'min';
+}
+
+function formatTime(date) {
+  return date.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+}
 
 function showPage(name, el) {
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
@@ -168,13 +193,13 @@ function updatePreview() {
   const msg = document.getElementById('import-message').value;
   const preview = document.getElementById('msg-preview');
   const count = document.getElementById('msg-count');
-  count.textContent = msg.length + ' caracteres';
+  count.textContent = msg.length + ' caractères';
   if (msg.trim()) {
     preview.style.color = 'var(--text)';
     preview.textContent = msg;
   } else {
     preview.style.color = 'var(--muted)';
-    preview.textContent = 'Votre message apparaitra ici...';
+    preview.textContent = 'Votre message apparaîtra ici...';
   }
 }
 
@@ -182,14 +207,14 @@ function updateQR(qr, ready) {
   const wrap = document.getElementById('qr-wrap');
   const navBtn = document.getElementById('nav-connexion');
   if (ready) {
-    wrap.innerHTML = '<div class="qr-placeholder" style="color:var(--green);border-color:var(--green)">&#10003; WhatsApp Connecte !</div><span class="qr-badge connected"><span class="dot"></span>Connecte</span>';
+    wrap.innerHTML = '<div class="qr-placeholder" style="color:var(--green);border-color:var(--green)">&#10003; WhatsApp Connecté !</div><span class="qr-badge connected"><span class="dot"></span>Connecté</span>';
     navBtn.innerHTML = '&#128241; Connexion <span style="color:var(--green);margin-left:auto">&#10003;</span>';
   } else if (qr && qr !== lastQr) {
     lastQr = qr;
     wrap.innerHTML = '<img src="' + qr + '" alt="QR Code WhatsApp"><span class="qr-badge scanning">&#128247; Scannez maintenant</span>';
     navBtn.innerHTML = '&#128241; Connexion <span class="nav-qr-dot"></span>';
   } else if (!qr && !ready) {
-    wrap.innerHTML = '<div class="qr-placeholder">&#8987; Generation du QR code...<br><small style="margin-top:8px;display:block">Patientez ~30 secondes</small></div>';
+    wrap.innerHTML = '<div class="qr-placeholder">&#8987; Génération du QR code...<br><small style="margin-top:8px;display:block">Patientez ~30 secondes</small></div>';
   }
 }
 
@@ -197,16 +222,52 @@ async function fetchStatus() {
   try {
     const r = await fetch('/api/status').then(r => r.json());
     document.getElementById('status-badge').innerHTML = r.ready
-      ? '<span class="badge badge-green"><span class="dot"></span>Connecte</span>'
-      : '<span class="badge badge-red"><span class="dot"></span>Deconnecte</span>';
+      ? '<span class="badge badge-green"><span class="dot"></span>Connecté</span>'
+      : '<span class="badge badge-red"><span class="dot"></span>Déconnecté</span>';
     document.getElementById('stat-sent').textContent = r.stats.sent;
     document.getElementById('stat-pending').textContent = r.pending;
     document.getElementById('stat-failed').textContent = r.stats.failed + r.stats.skipped;
+
     const done = r.total - r.pending;
     const pct = r.total > 0 ? Math.round(done / r.total * 100) : 0;
     document.getElementById('progress-bar').style.width = pct + '%';
-    document.getElementById('progress-label').textContent = done + ' / ' + r.total + ' contacts traites';
-    document.getElementById('btn-pause').textContent = r.paused ? 'Reprendre' : 'Pause';
+    document.getElementById('progress-label').textContent = done + ' / ' + r.total + ' contacts traités';
+    document.getElementById('progress-pct').textContent = pct + '%';
+    document.getElementById('btn-pause').textContent = r.paused ? '▶ Reprendre' : '⏸ Pause';
+
+    // Calcul ETA
+    const etaBox = document.getElementById('eta-box');
+    const statEta = document.getElementById('stat-eta');
+    const statEtaLabel = document.getElementById('stat-eta-label');
+    const etaFinish = document.getElementById('eta-finish');
+
+    if (r.pending > 0 && r.running && !r.paused) {
+      const totalSec = r.pending * AVG_DELAY_S;
+      const finishDate = new Date(Date.now() + totalSec * 1000);
+      const today = new Date();
+      const isToday = finishDate.toDateString() === today.toDateString();
+      const isTomorrow = finishDate.toDateString() === new Date(today.getTime() + 86400000).toDateString();
+      let label = isToday ? 'aujourd\'hui' : isTomorrow ? 'demain' : finishDate.toLocaleDateString('fr-FR', {weekday:'short', day:'numeric', month:'short'});
+
+      statEta.textContent = formatDuration(totalSec);
+      statEtaLabel.textContent = 'temps restant';
+      etaFinish.textContent = formatTime(finishDate) + ' ' + label;
+      etaBox.style.display = 'flex';
+    } else if (r.pending > 0 && !r.running) {
+      const totalSec = r.pending * AVG_DELAY_S;
+      statEta.textContent = formatDuration(totalSec);
+      statEtaLabel.textContent = 'si démarré maintenant';
+      etaBox.style.display = 'none';
+    } else if (r.pending === 0 && r.total > 0) {
+      statEta.textContent = '✅';
+      statEtaLabel.textContent = 'terminé';
+      etaBox.style.display = 'none';
+    } else {
+      statEta.textContent = '—';
+      statEtaLabel.textContent = 'aucun contact';
+      etaBox.style.display = 'none';
+    }
+
     updateQR(r.qr, r.ready);
     document.getElementById('log').innerHTML = r.log.map(l => {
       const t = new Date(l.time).toLocaleTimeString('fr-FR');
@@ -223,7 +284,7 @@ async function importCSV() {
   const message = document.getElementById('import-message').value.trim();
   if (!file) return;
   if (!message) {
-    document.getElementById('import-result').innerHTML = '<span class="badge badge-red">&#9888; Ecrivez un message avant d\'importer</span>';
+    document.getElementById('import-result').innerHTML = '<span class="badge badge-red">⚠️ Écrivez un message avant d\'importer</span>';
     return;
   }
   document.getElementById('dropzone-text').textContent = '⏳ Import en cours...';
@@ -233,13 +294,13 @@ async function importCSV() {
   const r = await fetch('/api/import',{method:'POST',body:fd}).then(r=>r.json());
   document.getElementById('dropzone-text').textContent = file.name;
   document.getElementById('import-result').innerHTML = r.ok
-    ? '<span class="badge badge-green">&#10003; ' + r.added + ' contacts importes avec votre message</span>'
+    ? '<span class="badge badge-green">✓ ' + r.added + ' contacts importés · durée estimée : ' + formatDuration(r.added * AVG_DELAY_S) + '</span>'
     : '<span class="badge badge-red">Erreur : ' + r.error + '</span>';
 }
 async function loadGroups() {
   const groups = await fetch('/api/groups').then(r=>r.json());
   const tbody = document.getElementById('groups-table');
-  if (!groups.length) { tbody.innerHTML='<tr><td colspan="3" style="color:var(--muted);text-align:center;padding:24px">Aucun groupe (WhatsApp connecte ?)</td></tr>'; return; }
+  if (!groups.length) { tbody.innerHTML='<tr><td colspan="3" style="color:var(--muted);text-align:center;padding:24px">Aucun groupe (WhatsApp connecté ?)</td></tr>'; return; }
   tbody.innerHTML = groups.map(g => '<tr><td><strong>' + g.name + '</strong></td><td>' + g.count + '</td><td><a href="/api/export-group/' + encodeURIComponent(g.name) + '" class="btn btn-ghost" style="padding:5px 12px;font-size:12px">Exporter CSV</a></td></tr>').join('');
 }
 fetchStatus();
