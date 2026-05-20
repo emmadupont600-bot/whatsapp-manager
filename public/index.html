@@ -6,19 +6,40 @@
 <title>WhatsApp Manager</title>
 <link href="https://api.fontshare.com/v2/css?f[]=satoshi@400,500,700&display=swap" rel="stylesheet">
 <style>
-:root{
+/* ── TOKENS ─────────────────────────────────── */
+:root,[data-theme="dark"]{
   --bg:#0f0f0f;--surface:#1a1a1a;--surface2:#222;--border:#2e2e2e;
   --text:#e8e8e8;--muted:#888;--faint:#444;
   --green:#22c55e;--red:#ef4444;--yellow:#f59e0b;--blue:#60a5fa;--purple:#a78bfa;
   --primary:#25d366;--primary-hover:#1db954;
   --radius:10px;--radius-sm:6px;--font:'Satoshi',sans-serif;
+  --shadow-md:0 4px 16px rgba(0,0,0,.4);
 }
+[data-theme="light"]{
+  --bg:#f5f5f3;--surface:#ffffff;--surface2:#f0f0ee;--border:#ddd;
+  --text:#1a1a1a;--muted:#666;--faint:#ccc;
+  --green:#16a34a;--red:#dc2626;--yellow:#d97706;--blue:#2563eb;--purple:#7c3aed;
+  --primary:#128c7e;--primary-hover:#0a6960;
+  --shadow-md:0 4px 16px rgba(0,0,0,.12);
+}
+
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-body{font-family:var(--font);background:var(--bg);color:var(--text);min-height:100vh;font-size:14px}
+body{font-family:var(--font);background:var(--bg);color:var(--text);min-height:100vh;font-size:14px;transition:background .2s,color .2s}
 .app{display:grid;grid-template-columns:224px 1fr;min-height:100vh}
-.sidebar{background:var(--surface);border-right:1px solid var(--border);padding:20px 14px;display:flex;flex-direction:column;gap:6px;overflow-y:auto}
+
+/* ── SIDEBAR ──────────────────────────────────*/
+.sidebar{background:var(--surface);border-right:1px solid var(--border);padding:20px 14px;display:flex;flex-direction:column;gap:6px;overflow-y:auto;transition:background .2s,border-color .2s}
 .logo{display:flex;align-items:center;gap:10px;padding:0 8px 18px;border-bottom:1px solid var(--border);margin-bottom:8px}
 .logo svg{color:var(--primary)}.logo span{font-size:15px;font-weight:700}
+.logo-right{margin-left:auto;display:flex;align-items:center;gap:8px}
+/* theme toggle */
+.theme-btn{background:none;border:1px solid var(--border);border-radius:var(--radius-sm);padding:4px 7px;cursor:pointer;color:var(--muted);font-size:14px;line-height:1;transition:all .15s}
+.theme-btn:hover{color:var(--text);border-color:var(--muted)}
+/* notif bell */
+.notif-btn{background:none;border:1px solid var(--border);border-radius:var(--radius-sm);padding:4px 7px;cursor:pointer;color:var(--muted);font-size:14px;line-height:1;position:relative;transition:all .15s}
+.notif-btn:hover{color:var(--text);border-color:var(--muted)}
+.notif-btn.active{color:var(--green);border-color:var(--green)}
+.notif-btn.denied{color:var(--red);border-color:var(--red)}
 .nav-section{font-size:10px;font-weight:700;color:var(--faint);text-transform:uppercase;letter-spacing:.1em;padding:10px 10px 4px}
 .nav-item{display:flex;align-items:center;gap:8px;padding:9px 10px;border-radius:var(--radius-sm);cursor:pointer;color:var(--muted);transition:all .15s;font-weight:500;border:none;background:none;width:100%;text-align:left;font-family:var(--font);font-size:13px}
 .nav-item:hover{background:var(--surface2);color:var(--text)}
@@ -26,10 +47,12 @@ body{font-family:var(--font);background:var(--bg);color:var(--text);min-height:1
 .account-badge{font-size:10px;font-weight:700;padding:2px 7px;border-radius:99px;margin-left:auto;flex-shrink:0}
 .badge-a1{background:color-mix(in oklch,var(--primary) 20%,transparent);color:var(--primary)}
 .badge-a2{background:color-mix(in oklch,var(--blue) 20%,transparent);color:var(--blue)}
+
+/* ── MAIN ─────────────────────────────────────*/
 .main{padding:28px;overflow-y:auto}
 .page{display:none;flex-direction:column;gap:20px}
 .page.active{display:flex}
-.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:18px}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:18px;transition:background .2s,border-color .2s}
 .card-title{font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:12px}
 .grid-4{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}
 .grid-2{display:grid;grid-template-columns:repeat(2,1fr);gap:14px}
@@ -44,14 +67,14 @@ body{font-family:var(--font);background:var(--bg);color:var(--text);min-height:1
 .badge-blue{background:color-mix(in oklch,var(--blue) 15%,transparent);color:var(--blue)}
 .dot{width:7px;height:7px;border-radius:50%;background:currentColor}
 .btn{display:inline-flex;align-items:center;gap:6px;padding:8px 16px;border-radius:var(--radius-sm);border:none;font-family:var(--font);font-size:13px;font-weight:600;cursor:pointer;transition:all .15s}
-.btn-primary{background:var(--primary);color:#000}.btn-primary:hover{background:var(--primary-hover)}
+.btn-primary{background:var(--primary);color:#fff}.btn-primary:hover{background:var(--primary-hover)}
 .btn-ghost{background:var(--surface2);color:var(--text);border:1px solid var(--border)}.btn-ghost:hover{background:var(--faint)}
 .btn-danger{background:color-mix(in oklch,var(--red) 15%,transparent);color:var(--red);border:1px solid color-mix(in oklch,var(--red) 25%,transparent)}
 .btn-orange{background:color-mix(in oklch,var(--yellow) 15%,transparent);color:var(--yellow);border:1px solid color-mix(in oklch,var(--yellow) 25%,transparent)}
 .btn-row{display:flex;gap:8px;flex-wrap:wrap}
 .form-group{display:flex;flex-direction:column;gap:6px;margin-bottom:14px}
 label{font-size:12px;font-weight:600;color:var(--muted)}
-input[type=text],input[type=url],input[type=number],textarea,select{background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:var(--radius-sm);padding:9px 12px;font-family:var(--font);font-size:13px;outline:none;transition:border-color .15s;width:100%}
+input[type=text],input[type=url],input[type=number],input[type=datetime-local],textarea,select{background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:var(--radius-sm);padding:9px 12px;font-family:var(--font);font-size:13px;outline:none;transition:border-color .15s,background .2s;width:100%}
 textarea{resize:vertical;min-height:100px}
 input:focus,textarea:focus,select:focus{border-color:var(--primary)}
 .msg-preview{background:color-mix(in oklch,var(--primary) 8%,var(--surface2));border:1px solid color-mix(in oklch,var(--primary) 30%,transparent);border-radius:var(--radius-sm);padding:11px 13px;font-size:13px;line-height:1.6;white-space:pre-wrap;word-break:break-word;color:var(--text);margin-top:6px}
@@ -66,8 +89,7 @@ input:focus,textarea:focus,select:focus{border-color:var(--primary)}
 .quota-box .quota-reset{font-size:12px;color:var(--muted);margin-top:4px}
 .quota-progress{height:8px;background:var(--surface2);border-radius:99px;overflow:hidden;margin:8px 0 4px}
 .quota-fill{height:100%;background:var(--yellow);border-radius:99px;transition:width .4s}
-.quota-fill.full{background:var(--red)}
-.quota-fill.ok{background:var(--green)}
+.quota-fill.full{background:var(--red)}.quota-fill.ok{background:var(--green)}
 .limit-input-row{display:flex;align-items:center;gap:10px;margin-top:8px}
 .limit-input-row input{max-width:100px;text-align:center}
 .qr-wrap{display:flex;flex-direction:column;align-items:center;gap:14px;padding:20px}
@@ -77,9 +99,9 @@ input:focus,textarea:focus,select:focus{border-color:var(--primary)}
 .qr-badge.scanning{background:color-mix(in oklch,var(--yellow) 15%,transparent);color:var(--yellow);animation:pulse 1.5s infinite}
 .qr-badge.connected{background:color-mix(in oklch,var(--green) 15%,transparent);color:var(--green)}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
-.log-wrap{background:#0a0a0a;border-radius:var(--radius-sm);padding:12px;height:260px;overflow-y:auto;font-size:12px;font-family:'SF Mono','Fira Code',monospace;display:flex;flex-direction:column;gap:3px}
+.log-wrap{background:color-mix(in oklch,var(--bg) 60%,var(--surface2));border-radius:var(--radius-sm);padding:12px;height:260px;overflow-y:auto;font-size:12px;font-family:'SF Mono','Fira Code',monospace;display:flex;flex-direction:column;gap:3px}
 .log-item{display:flex;gap:8px}
-.log-time{color:var(--faint);flex-shrink:0}.log-info{color:#aaa}.log-success{color:var(--green)}.log-warn{color:var(--yellow)}.log-error{color:var(--red)}
+.log-time{color:var(--faint);flex-shrink:0}.log-info{color:var(--muted)}.log-success{color:var(--green)}.log-warn{color:var(--yellow)}.log-error{color:var(--red)}
 .table-wrap{overflow-x:auto}
 table{width:100%;border-collapse:collapse;font-size:13px}
 th{text-align:left;font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;padding:7px 11px;border-bottom:1px solid var(--border)}
@@ -95,24 +117,64 @@ tr:hover td{background:var(--surface2)}
 .dropzone:hover{border-color:var(--primary);color:var(--primary)}
 .dropzone input{display:none}
 .countdown{font-size:22px;font-weight:700;color:var(--yellow);font-variant-numeric:tabular-nums}
+
+/* ── QUEUE FILTERS ────────────────────────────*/
+.queue-toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+.queue-toolbar input[type=text]{max-width:220px;padding:7px 11px}
+.status-filter{display:flex;gap:4px;flex-wrap:wrap}
+.filter-btn{padding:4px 12px;border-radius:99px;font-size:11px;font-weight:600;cursor:pointer;border:1px solid var(--border);background:var(--surface2);color:var(--muted);transition:all .15s;font-family:var(--font)}
+.filter-btn:hover{background:var(--surface);color:var(--text)}
+.filter-btn.active{background:color-mix(in oklch,var(--primary) 15%,transparent);color:var(--primary);border-color:color-mix(in oklch,var(--primary) 35%,transparent)}
+.empty-state{display:flex;flex-direction:column;align-items:center;text-align:center;padding:40px 20px;color:var(--muted)}
+.empty-state p{margin-top:8px;font-size:13px}
+
+/* ── NOTIFICATION BANNER ──────────────────────*/
+.notif-banner{position:fixed;top:18px;right:18px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px 18px;box-shadow:var(--shadow-md);z-index:9999;display:flex;align-items:center;gap:12px;font-size:13px;max-width:340px;transform:translateY(-120%);opacity:0;transition:all .3s cubic-bezier(.16,1,.3,1)}
+.notif-banner.show{transform:translateY(0);opacity:1}
+.notif-banner .notif-icon{font-size:22px;flex-shrink:0}
+.notif-banner .notif-close{margin-left:auto;cursor:pointer;color:var(--muted);font-size:16px;padding:2px 4px;flex-shrink:0}
+
+/* ── MULTI-CSV ────────────────────────────────*/
+.csv-file-list{display:flex;flex-direction:column;gap:4px;margin-top:8px}
+.csv-file-item{display:flex;align-items:center;justify-content:space-between;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:6px 10px;font-size:12px;color:var(--muted)}
+.csv-file-item .remove-csv{cursor:pointer;color:var(--red);margin-left:8px;font-size:14px}
+.merge-mode-box{background:color-mix(in oklch,var(--blue) 8%,var(--surface2));border:1px solid color-mix(in oklch,var(--blue) 25%,transparent);border-radius:var(--radius-sm);padding:10px 13px;font-size:12px;color:var(--blue);display:flex;align-items:center;gap:8px;margin-top:8px}
+
+/* ── SCHEDULE ─────────────────────────────────*/
+.schedule-box{background:color-mix(in oklch,var(--purple) 8%,var(--surface2));border:1px solid color-mix(in oklch,var(--purple) 25%,transparent);border-radius:var(--radius-sm);padding:12px 14px;margin-top:8px}
+.schedule-box .sch-title{font-size:12px;font-weight:600;color:var(--purple);margin-bottom:8px}
 </style>
 </head>
 <body>
+
+<!-- Notification banner -->
+<div class="notif-banner" id="notif-banner">
+  <span class="notif-icon" id="notif-icon">🔔</span>
+  <div id="notif-text">Notification</div>
+  <span class="notif-close" onclick="closeNotifBanner()">✕</span>
+</div>
+
 <div class="app">
   <aside class="sidebar">
     <div class="logo">
       <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>
       <span>WA Manager</span>
+      <div class="logo-right">
+        <button class="notif-btn" id="notif-toggle-btn" onclick="toggleNotifications()" title="Notifications navigateur">🔔</button>
+        <button class="theme-btn" id="theme-btn" onclick="toggleTheme()" title="Thème clair/sombre">🌙</button>
+      </div>
     </div>
 
     <div class="nav-section">Compte 1</div>
     <button class="nav-item active" onclick="switchAccount(1);showPage('dashboard',this)">📊 Dashboard <span class="account-badge badge-a1">N°1</span></button>
     <button class="nav-item" onclick="switchAccount(1);showPage('import',this)">📥 Importer CSV <span class="account-badge badge-a1">N°1</span></button>
+    <button class="nav-item" onclick="switchAccount(1);showPage('queue',this)">📋 Queue <span class="account-badge badge-a1">N°1</span></button>
     <button class="nav-item" onclick="switchAccount(1);showPage('connection',this)">📱 Connexion <span class="account-badge badge-a1" id="conn-badge-1">N°1</span></button>
 
     <div class="nav-section">Compte 2</div>
     <button class="nav-item" onclick="switchAccount(2);showPage('dashboard',this)">📊 Dashboard <span class="account-badge badge-a2">N°2</span></button>
     <button class="nav-item" onclick="switchAccount(2);showPage('import',this)">📥 Importer CSV <span class="account-badge badge-a2">N°2</span></button>
+    <button class="nav-item" onclick="switchAccount(2);showPage('queue',this)">📋 Queue <span class="account-badge badge-a2">N°2</span></button>
     <button class="nav-item" onclick="switchAccount(2);showPage('connection',this)">📱 Connexion <span class="account-badge badge-a2" id="conn-badge-2">N°2</span></button>
 
     <div class="nav-section">Autre</div>
@@ -123,14 +185,15 @@ tr:hover td{background:var(--surface2)}
 
   <main class="main">
 
-    <!-- DASHBOARD -->
+    <!-- ─── DASHBOARD ──────────────────────────────── -->
     <div class="page active" id="page-dashboard">
       <div class="page-header">
         <h1 class="page-title" id="dash-title">Dashboard — Compte 1</h1>
-        <div id="status-badge"></div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <div id="status-badge"></div>
+        </div>
       </div>
 
-      <!-- Stats -->
       <div class="grid-4">
         <div class="card"><div class="card-title">Envoyés</div><div class="stat-val green" id="stat-sent">0</div><div class="stat-label">messages envoyés</div></div>
         <div class="card"><div class="card-title">En attente</div><div class="stat-val yellow" id="stat-pending">0</div><div class="stat-label">dans la queue</div></div>
@@ -138,7 +201,7 @@ tr:hover td{background:var(--surface2)}
         <div class="card"><div class="card-title">Temps restant</div><div class="stat-val blue" id="stat-eta">—</div><div class="stat-label" id="stat-eta-label">en attente</div></div>
       </div>
 
-      <!-- Quota journalier -->
+      <!-- Quota -->
       <div class="card" id="quota-card">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
           <div class="card-title" style="margin-bottom:0">Quota journalier (24h glissantes)</div>
@@ -157,7 +220,6 @@ tr:hover td{background:var(--surface2)}
             <div class="countdown" id="quota-countdown">—</div>
           </div>
         </div>
-        <!-- Modifier la limite -->
         <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border);display:flex;align-items:center;gap:10px;flex-wrap:wrap">
           <span style="font-size:12px;color:var(--muted)">Limite :</span>
           <input type="number" id="limit-input" min="1" max="1000" value="300" style="max-width:80px;padding:5px 8px;text-align:center">
@@ -167,17 +229,48 @@ tr:hover td{background:var(--surface2)}
         </div>
       </div>
 
-      <!-- Alerte quota atteint -->
+      <!-- Quota alert -->
       <div id="quota-alert" style="display:none">
         <div class="quota-box">
           <div class="quota-title">⏸ Quota atteint pour ce compte</div>
           <div id="quota-alert-msg"></div>
           <div class="quota-reset" id="quota-reset-info"></div>
           <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
-            <button class="btn btn-primary" onclick="startBot()" title="Forcer le redémarrage maintenant">▶ Relancer maintenant</button>
+            <button class="btn btn-primary" onclick="startBot()">▶ Relancer maintenant</button>
             <div id="auto-resume-badge"></div>
           </div>
         </div>
+      </div>
+
+      <!-- Planning -->
+      <div class="card">
+        <div class="card-title">Planifier le démarrage</div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
+          <div class="form-group" style="margin-bottom:0;flex:1;min-width:200px">
+            <label>Date & heure de démarrage</label>
+            <input type="datetime-local" id="schedule-dt" style="width:100%">
+          </div>
+          <button class="btn btn-ghost" onclick="scheduleBot()" style="flex-shrink:0">📅 Planifier</button>
+          <button class="btn btn-danger" onclick="cancelSchedule()" style="flex-shrink:0;display:none" id="btn-cancel-schedule">✕ Annuler</button>
+        </div>
+        <div id="schedule-status" style="margin-top:8px"></div>
+      </div>
+
+      <!-- Test message -->
+      <div class="card">
+        <div class="card-title">Message de test</div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
+          <div class="form-group" style="margin-bottom:0;flex:1;min-width:180px">
+            <label>Numéro (avec indicatif, sans +)</label>
+            <input type="text" id="test-phone" placeholder="33612345678">
+          </div>
+          <div class="form-group" style="margin-bottom:0;flex:2;min-width:200px">
+            <label>Message à envoyer</label>
+            <input type="text" id="test-msg" placeholder="Test depuis WA Manager 🤖">
+          </div>
+          <button class="btn btn-ghost" onclick="sendTestMessage()" style="flex-shrink:0">🧪 Envoyer</button>
+        </div>
+        <div id="test-result" style="margin-top:8px;font-size:12px"></div>
       </div>
 
       <!-- Contrôle -->
@@ -201,14 +294,14 @@ tr:hover td{background:var(--surface2)}
       <div class="card"><div class="card-title">Journal</div><div class="log-wrap" id="log"></div></div>
     </div>
 
-    <!-- IMPORT -->
+    <!-- ─── IMPORT ──────────────────────────────────── -->
     <div class="page" id="page-import">
       <h1 class="page-title" id="import-title">Importer — Compte 1</h1>
       <div class="card">
         <div class="card-title">Message</div>
         <div class="form-group">
-          <label>Texte du message *</label>
-          <textarea id="import-message" placeholder="Bonjour 👋 j'ai pensé à toi pour cette opportunité..." oninput="updatePreview()"></textarea>
+          <label>Texte du message * <span style="font-weight:400;color:var(--muted)">(utilisez <code style="background:var(--surface2);padding:1px 5px;border-radius:3px">{prénom}</code> pour personnaliser)</span></label>
+          <textarea id="import-message" placeholder="Bonjour {prénom} 👋 j'ai pensé à toi pour cette opportunité..." oninput="updatePreview()"></textarea>
           <div class="msg-count" id="msg-count">0 caractères</div>
         </div>
         <div class="form-group">
@@ -220,24 +313,74 @@ tr:hover td{background:var(--surface2)}
         <div class="msg-preview" id="msg-preview" style="color:var(--muted)">Votre message apparaîtra ici...</div>
         <div id="link-preview-wrap"></div>
       </div>
+
       <div class="card">
-        <div class="card-title">Fichier CSV</div>
-        <p style="color:var(--muted);font-size:12px;margin-bottom:12px">Colonne requise : <strong>telephone</strong> — Optionnelles : <strong>message</strong>, <strong>link</strong></p>
-        <label class="dropzone" for="csv-file">
-          <input type="file" id="csv-file" accept=".csv" onchange="importCSV()">
-          <div id="dropzone-text">📄 Glissez votre CSV ou cliquez ici</div>
+        <div class="card-title">Fichiers CSV</div>
+        <p style="color:var(--muted);font-size:12px;margin-bottom:12px">Colonnes : <strong>telephone</strong> (requis) · <strong>prenom</strong>, <strong>nom</strong>, <strong>message</strong>, <strong>link</strong> (optionnel)</p>
+
+        <!-- Multi-CSV merge mode -->
+        <div class="merge-mode-box" id="merge-info" style="display:none">
+          ℹ️ <span id="merge-info-text">Mode fusion activé — les doublons seront ignorés automatiquement.</span>
+        </div>
+
+        <label class="dropzone" for="csv-file" id="drop-zone" ondragover="handleDragOver(event)" ondrop="handleDrop(event)">
+          <input type="file" id="csv-file" accept=".csv" multiple onchange="handleCSVFiles(this.files)">
+          <div id="dropzone-text">📄 Glissez un ou plusieurs CSV ici, ou cliquez</div>
         </label>
+
+        <div class="csv-file-list" id="csv-file-list"></div>
         <div id="import-result" style="margin-top:10px;font-size:13px"></div>
+
+        <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+          <button class="btn btn-primary" id="btn-import-all" onclick="importAllCSV()" style="display:none">📤 Importer tous les fichiers</button>
+          <button class="btn btn-danger" id="btn-clear-files" onclick="clearCSVFiles()" style="display:none">✕ Effacer la liste</button>
+        </div>
       </div>
     </div>
 
-    <!-- GROUPES -->
+    <!-- ─── QUEUE ───────────────────────────────────── -->
+    <div class="page" id="page-queue">
+      <div class="page-header">
+        <h1 class="page-title" id="queue-title">Queue — Compte 1</h1>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-ghost" onclick="loadQueue()">Actualiser</button>
+          <button class="btn btn-ghost" onclick="exportQueueFiltered()">⬇ Exporter filtrés</button>
+        </div>
+      </div>
+
+      <!-- Toolbar -->
+      <div class="card" style="padding:14px 18px">
+        <div class="queue-toolbar">
+          <input type="text" id="queue-search" placeholder="🔍 Rechercher un numéro ou prénom..." oninput="filterQueue()" style="max-width:260px">
+          <div class="status-filter">
+            <button class="filter-btn active" data-status="all" onclick="setStatusFilter('all',this)">Tous</button>
+            <button class="filter-btn" data-status="pending" onclick="setStatusFilter('pending',this)">⏳ Pending</button>
+            <button class="filter-btn" data-status="done" onclick="setStatusFilter('done',this)">✅ Done</button>
+            <button class="filter-btn" data-status="failed" onclick="setStatusFilter('failed',this)">❌ Failed</button>
+            <button class="filter-btn" data-status="skipped" onclick="setStatusFilter('skipped',this)">⏭ Skipped</button>
+          </div>
+          <span style="font-size:11px;color:var(--muted);margin-left:4px" id="queue-count-label"></span>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Téléphone</th><th>Prénom / Nom</th><th>Statut</th><th>Message</th><th>Envoyé le</th></tr></thead>
+            <tbody id="queue-table"><tr><td colspan="5" style="color:var(--muted);text-align:center;padding:24px">Cliquez sur Actualiser</td></tr></tbody>
+          </table>
+        </div>
+        <div id="queue-pagination" style="display:flex;gap:8px;justify-content:center;margin-top:14px"></div>
+      </div>
+    </div>
+
+    <!-- ─── GROUPES ──────────────────────────────────── -->
     <div class="page" id="page-groups">
       <div class="page-header"><h1 class="page-title">Groupes WhatsApp</h1><button class="btn btn-ghost" onclick="loadGroups()">Actualiser</button></div>
       <div class="card"><div class="table-wrap"><table><thead><tr><th>Groupe</th><th>Membres</th><th>Export</th></tr></thead><tbody id="groups-table"><tr><td colspan="3" style="color:var(--muted);text-align:center;padding:20px">Cliquez sur Actualiser</td></tr></tbody></table></div></div>
     </div>
 
-    <!-- CONNEXION -->
+    <!-- ─── CONNEXION ────────────────────────────────── -->
     <div class="page" id="page-connection">
       <h1 class="page-title" id="conn-title">Connexion — Compte 1</h1>
       <div class="grid-2">
@@ -257,7 +400,7 @@ tr:hover td{background:var(--surface2)}
       </div>
     </div>
 
-    <!-- PARAMÈTRES -->
+    <!-- ─── PARAMÈTRES ───────────────────────────────── -->
     <div class="page" id="page-settings">
       <h1 class="page-title">Paramètres</h1>
       <div class="card">
@@ -284,17 +427,22 @@ tr:hover td{background:var(--surface2)}
         <span id="settings-saved" style="font-size:12px;color:var(--green);margin-left:10px;display:none">✓ Sauvegardé</span>
       </div>
       <div class="card">
+        <div class="card-title">Notifications navigateur</div>
+        <p style="font-size:13px;color:var(--muted);margin-bottom:12px">Reçois une notification quand la queue se termine ou que le quota est atteint — même si l'onglet est en arrière-plan.</p>
+        <button class="btn btn-ghost" id="notif-perm-btn" onclick="requestNotifPermission()">🔔 Activer les notifications</button>
+        <span id="notif-perm-status" style="font-size:12px;color:var(--muted);margin-left:10px"></span>
+      </div>
+      <div class="card">
         <div class="card-title">Informations quota</div>
         <div style="color:var(--muted);font-size:13px;line-height:1.8">
           <p>📌 La limite WhatsApp fonctionne sur une <strong style="color:var(--text)">fenêtre glissante de 24h</strong>.</p>
           <p>⏰ Le quota se remet à zéro <strong style="color:var(--text)">exactement 24h après le 1er message envoyé</strong> de la session.</p>
           <p>🔁 Avec la reprise automatique activée, le bot reprend tout seul à ce moment.</p>
-          <p>▶️ Ou vous pouvez cliquer <strong style="color:var(--text)">"Relancer maintenant"</strong> depuis le dashboard à tout moment.</p>
         </div>
       </div>
     </div>
 
-    <!-- VUE D'ENSEMBLE -->
+    <!-- ─── VUE D'ENSEMBLE ──────────────────────────── -->
     <div class="page" id="page-overview">
       <h1 class="page-title">Vue d'ensemble — 2 comptes</h1>
       <div class="grid-2" id="overview-grid"></div>
@@ -302,13 +450,100 @@ tr:hover td{background:var(--surface2)}
 
   </main>
 </div>
+
 <script>
+/* ═══════════════════════════════════════════════════
+   GLOBALS
+═══════════════════════════════════════════════════ */
 const AVG = 82;
 let currentAccount = 1;
 let lastQr = {1:null,2:null};
 let countdownInterval = null;
-let lastStatus = null;
+let lastStatus = {1:null,2:null};
+let scheduleTimer = null;
+// Queue state
+let queueData = [];
+let queueFilter = 'all';
+let queueSearch = '';
+let queuePage = 1;
+const Q_PER_PAGE = 50;
+// CSV files queue
+let pendingCSVFiles = [];
+// Notifications
+let notifEnabled = Notification.permission === 'granted';
+let prevRunning = {1:false,2:false};
+let prevLimitReached = {1:false,2:false};
+let notifBannerTimer = null;
 
+/* ═══════════════════════════════════════════════════
+   THEME TOGGLE
+═══════════════════════════════════════════════════ */
+function toggleTheme() {
+  const html = document.documentElement;
+  const isDark = html.getAttribute('data-theme') === 'dark';
+  const next = isDark ? 'light' : 'dark';
+  html.setAttribute('data-theme', next);
+  document.getElementById('theme-btn').textContent = next === 'dark' ? '🌙' : '☀️';
+}
+
+/* ═══════════════════════════════════════════════════
+   BROWSER NOTIFICATIONS
+═══════════════════════════════════════════════════ */
+function updateNotifUI() {
+  const perm = Notification.permission;
+  const btn = document.getElementById('notif-toggle-btn');
+  const status = document.getElementById('notif-perm-status');
+  const permBtn = document.getElementById('notif-perm-btn');
+  if (perm === 'granted') {
+    btn.className = 'notif-btn active'; btn.title = 'Notifications activées';
+    if (status) status.textContent = '✓ Notifications activées';
+    if (permBtn) permBtn.textContent = '✓ Activées';
+    notifEnabled = true;
+  } else if (perm === 'denied') {
+    btn.className = 'notif-btn denied'; btn.title = 'Notifications bloquées';
+    if (status) status.textContent = '⚠️ Bloquées — autorisez dans les réglages du navigateur';
+    notifEnabled = false;
+  } else {
+    btn.className = 'notif-btn'; btn.title = 'Activer les notifications';
+    if (status) status.textContent = 'Non activées';
+    notifEnabled = false;
+  }
+}
+
+async function requestNotifPermission() {
+  if (!('Notification' in window)) { alert('Votre navigateur ne supporte pas les notifications.'); return; }
+  const perm = await Notification.requestPermission();
+  updateNotifUI();
+  if (perm === 'granted') showNotifBanner('✅', 'Notifications activées !', 'Vous serez alerté quand la queue est terminée.');
+}
+
+function toggleNotifications() {
+  if (Notification.permission === 'granted') { notifEnabled = !notifEnabled; showNotifBanner(notifEnabled?'🔔':'🔕', notifEnabled?'Notifications activées':'Notifications désactivées',''); }
+  else requestNotifPermission();
+}
+
+function showNotifBanner(icon, title, body) {
+  document.getElementById('notif-icon').textContent = icon;
+  document.getElementById('notif-text').innerHTML = `<strong>${title}</strong>${body?`<br><span style="font-size:12px;color:var(--muted)">${body}</span>`:''}`;
+  const b = document.getElementById('notif-banner');
+  b.classList.add('show');
+  if (notifBannerTimer) clearTimeout(notifBannerTimer);
+  notifBannerTimer = setTimeout(closeNotifBanner, 5000);
+}
+function closeNotifBanner() { document.getElementById('notif-banner').classList.remove('show'); }
+
+function fireNotification(title, body, icon='') {
+  // In-app banner always
+  showNotifBanner(icon||'🔔', title, body);
+  // Native notification if allowed & page hidden
+  if (notifEnabled && Notification.permission === 'granted' && document.hidden) {
+    new Notification(title, { body, icon: '/favicon.ico', badge: '/favicon.ico' });
+  }
+}
+
+/* ═══════════════════════════════════════════════════
+   NAVIGATION
+═══════════════════════════════════════════════════ */
 function switchAccount(n) { currentAccount = n; }
 
 function showPage(name, el) {
@@ -320,11 +555,15 @@ function showPage(name, el) {
   if (name==='dashboard')  document.getElementById('dash-title').textContent   = `Dashboard — ${label}`;
   if (name==='import')     document.getElementById('import-title').textContent  = `Importer — ${label}`;
   if (name==='connection') document.getElementById('conn-title').textContent    = `Connexion — ${label}`;
+  if (name==='queue')      { document.getElementById('queue-title').textContent = `Queue — ${label}`; loadQueue(); }
   if (name==='groups')     loadGroups();
   if (name==='overview')   renderOverview();
-  if (name==='settings')   loadSettings();
+  if (name==='settings')   { loadSettings(); updateNotifUI(); }
 }
 
+/* ═══════════════════════════════════════════════════
+   HELPERS
+═══════════════════════════════════════════════════ */
 function formatDuration(s) {
   if (s < 60)   return Math.round(s)+'s';
   if (s < 3600) return Math.floor(s/60)+'min';
@@ -341,23 +580,31 @@ function formatCountdown(ms) {
   return `${ss}s`;
 }
 
-function updatePreview() {
-  const msg  = document.getElementById('import-message').value;
-  const link = document.getElementById('import-link').value.trim();
-  document.getElementById('msg-count').textContent = msg.length+' caractères';
-  const p = document.getElementById('msg-preview');
-  if (msg.trim()) { p.style.color='var(--text)'; p.textContent=msg; }
-  else { p.style.color='var(--muted)'; p.textContent='Votre message apparaîtra ici...'; }
-  const linkWrap = document.getElementById('link-preview-wrap');
-  const linkInfo = document.getElementById('link-info');
-  if (link) {
-    linkInfo.style.display='flex';
-    linkWrap.innerHTML = `<div class="link-preview-box">🔗 <a href="${link}" target="_blank">${link}</a></div>`;
-  } else { linkInfo.style.display='none'; linkWrap.innerHTML=''; }
+function statusBadge(s) {
+  const map = { pending:'badge-yellow', done:'badge-green', failed:'badge-red', skipped:'badge-yellow', relayed:'badge-blue', replied:'badge-blue', blacklisted:'badge-red' };
+  const icon = { pending:'⏳',done:'✅',failed:'❌',skipped:'⏭',relayed:'🔁',replied:'💬',blacklisted:'🚫' };
+  return `<span class="badge ${map[s]||'badge-blue'}">${icon[s]||''} ${s}</span>`;
 }
 
+/* ═══════════════════════════════════════════════════
+   STATUS POLLING
+═══════════════════════════════════════════════════ */
 function applyStatus(r) {
-  lastStatus = r;
+  const acct = r.id || currentAccount;
+  const prev = lastStatus[acct] || {};
+  lastStatus[acct] = r;
+
+  // ── Notifications on state change ──
+  if (prev.running && !r.running && !r.paused && r.pending === 0 && r.total > 0) {
+    fireNotification('✅ Queue terminée', `Compte ${acct} — ${r.stats.sent} messages envoyés.`, '✅');
+  }
+  if (!prev.limitReached && r.limitReached) {
+    fireNotification('⛔ Quota atteint', `Compte ${acct} — ${r.dailySent}/${r.dailyLimit} msgs. Reprise dans ${formatCountdown(r.resetInMs)}.`, '⛔');
+  }
+
+  // Only update dashboard if active
+  if (!document.getElementById('page-dashboard').classList.contains('active')) return;
+
   document.getElementById('stat-sent').textContent    = r.stats.sent;
   document.getElementById('stat-pending').textContent  = r.pending;
   document.getElementById('stat-failed').textContent   = r.stats.failed+r.stats.skipped;
@@ -365,7 +612,6 @@ function applyStatus(r) {
     ? '<span class="badge badge-green"><span class="dot"></span>Connecté</span>'
     : '<span class="badge badge-red"><span class="dot"></span>Déconnecté</span>';
 
-  // ── Quota bar ──────────────────────────────────────────────────────────
   const pctQ = r.dailyLimit > 0 ? Math.min(100, Math.round(r.dailySent / r.dailyLimit * 100)) : 0;
   document.getElementById('quota-count').textContent = `${r.dailySent} / ${r.dailyLimit}`;
   document.getElementById('quota-pct').textContent   = pctQ + '%';
@@ -374,27 +620,23 @@ function applyStatus(r) {
   bar.className = 'quota-fill' + (pctQ >= 100 ? ' full' : pctQ >= 70 ? '' : ' ok');
   document.getElementById('limit-input').value = r.dailyLimit;
 
-  // Badge quota
   const qBadge = document.getElementById('quota-badge');
   if (pctQ >= 100) qBadge.innerHTML = '<span class="badge badge-red">⛔ Quota atteint</span>';
   else if (pctQ >= 70) qBadge.innerHTML = '<span class="badge badge-yellow">⚠️ Bientôt atteint</span>';
   else qBadge.innerHTML = '<span class="badge badge-green">✓ OK</span>';
 
-  // Countdown reset quota
   if (countdownInterval) clearInterval(countdownInterval);
   if (r.windowStart && r.resetInMs > 0) {
     const targetTs = Date.now() + r.resetInMs;
-    function tick() {
+    const tick = () => {
       const left = targetTs - Date.now();
       document.getElementById('quota-countdown').textContent = left > 0 ? formatCountdown(left) : '↻ Reset';
-    }
-    tick();
-    countdownInterval = setInterval(tick, 1000);
+    };
+    tick(); countdownInterval = setInterval(tick, 1000);
   } else {
     document.getElementById('quota-countdown').textContent = r.dailySent > 0 ? '24h' : '—';
   }
 
-  // ── Alerte quota atteint ───────────────────────────────────────────────
   const alertBox = document.getElementById('quota-alert');
   if (r.limitReached) {
     alertBox.style.display = 'block';
@@ -405,19 +647,14 @@ function applyStatus(r) {
       resetInfo.textContent = `⏰ Reprise automatique prévue : ${formatTime(d)}${d.toDateString()===new Date().toDateString()?' auj.':', le '+d.toLocaleDateString('fr-FR')}`;
     } else if (r.resetInMs > 0) {
       resetInfo.textContent = `⏳ Quota se remet à 0 dans ${formatCountdown(r.resetInMs)}`;
-    } else {
-      resetInfo.textContent = 'Vous pouvez relancer manuellement dès maintenant.';
     }
     document.getElementById('auto-resume-badge').innerHTML = r.autoResume
       ? '<span class="badge badge-blue">🔄 Reprise auto activée</span>'
       : '<span class="badge badge-yellow">⚠️ Reprise auto désactivée</span>';
-  } else {
-    alertBox.style.display = 'none';
-  }
+  } else { alertBox.style.display = 'none'; }
 
-  // ── Progress queue ─────────────────────────────────────────────────────
   const done=r.total-r.pending, pct=r.total>0?Math.round(done/r.total*100):0;
-  document.getElementById('progress-bar').style.width  = pct+'%';
+  document.getElementById('progress-bar').style.width   = pct+'%';
   document.getElementById('progress-label').textContent = done+' / '+r.total+' contacts traités';
   document.getElementById('progress-pct').textContent   = pct+'%';
   document.getElementById('btn-pause').textContent      = r.paused ? '▶ Reprendre' : '⏸ Pause';
@@ -429,19 +666,19 @@ function applyStatus(r) {
   const etaBox=document.getElementById('eta-box'),statEta=document.getElementById('stat-eta'),etaLabel=document.getElementById('stat-eta-label');
   if (r.pending>0&&r.running&&!r.paused) {
     const sec=r.pending*AVG,fin=new Date(Date.now()+sec*1000);
-    statEta.textContent=formatDuration(sec);etaLabel.textContent='temps restant';
+    statEta.textContent=formatDuration(sec); etaLabel.textContent='temps restant';
     document.getElementById('eta-finish').textContent=formatTime(fin)+(fin.toDateString()===new Date().toDateString()?' auj.':' demain');
     etaBox.style.display='flex';
   } else if (r.pending>0) {
-    statEta.textContent=formatDuration(r.pending*AVG);etaLabel.textContent='si démarré maintenant';etaBox.style.display='none';
+    statEta.textContent=formatDuration(r.pending*AVG); etaLabel.textContent='si démarré maintenant'; etaBox.style.display='none';
   } else {
-    statEta.textContent=r.total>0?'✅':'—';etaLabel.textContent=r.total>0?'terminé':'aucun contact';etaBox.style.display='none';
+    statEta.textContent=r.total>0?'✅':'—'; etaLabel.textContent=r.total>0?'terminé':'aucun contact'; etaBox.style.display='none';
   }
 
-  updateQR(r.qr, r.ready, currentAccount);
+  updateQR(r.qr, r.ready, acct);
   const b1=document.getElementById('conn-badge-1'),b2=document.getElementById('conn-badge-2');
-  if (r.id===1&&b1) b1.textContent=r.ready?'✅':'N°1';
-  if (r.id===2&&b2) b2.textContent=r.ready?'✅':'N°2';
+  if (acct===1&&b1) b1.textContent=r.ready?'✅':'N°1';
+  if (acct===2&&b2) b2.textContent=r.ready?'✅':'N°2';
 
   document.getElementById('log').innerHTML = r.log.map(l=>{
     const t=new Date(l.time).toLocaleTimeString('fr-FR');
@@ -460,31 +697,258 @@ function updateQR(qr,ready,acct) {
 async function fetchStatus() {
   try {
     const r=await fetch(`/api/${currentAccount}/status`).then(r=>r.json());
-    if (document.getElementById('page-dashboard').classList.contains('active')||
-        document.getElementById('page-connection').classList.contains('active')) applyStatus(r);
-    const b1=document.getElementById('conn-badge-1'),b2=document.getElementById('conn-badge-2');
-    if (currentAccount===1&&b1) b1.textContent=r.ready?'✅':'N°1';
-    if (currentAccount===2&&b2) b2.textContent=r.ready?'✅':'N°2';
+    applyStatus(r);
   } catch(e){}
 }
 
+/* ═══════════════════════════════════════════════════
+   BOT CONTROLS
+═══════════════════════════════════════════════════ */
+async function startBot()  { const r=await fetch(`/api/${currentAccount}/start`,{method:'POST'}).then(r=>r.json()); if(!r.ok) alert('Erreur : '+r.error); }
+async function pauseBot()  { await fetch(`/api/${currentAccount}/pause`,{method:'POST'}); }
+async function clearQueue(){ if(!confirm('Vider la queue du compte '+currentAccount+' ?')) return; await fetch(`/api/${currentAccount}/clear`,{method:'POST'}); }
+function exportCSV()       { window.open(`/api/${currentAccount}/export`,'_blank'); }
+
+/* ═══════════════════════════════════════════════════
+   SCHEDULE
+═══════════════════════════════════════════════════ */
+async function scheduleBot() {
+  const val = document.getElementById('schedule-dt').value;
+  if (!val) return;
+  const dt = new Date(val);
+  if (dt <= new Date()) { alert('Choisissez une date dans le futur.'); return; }
+  const r = await fetch(`/api/${currentAccount}/schedule`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({scheduledAt:dt.toISOString()})}).then(r=>r.json()).catch(()=>({ok:false}));
+  if (r.ok !== false) {
+    document.getElementById('btn-cancel-schedule').style.display='inline-flex';
+    startScheduleCountdown(dt);
+  }
+}
+
+async function cancelSchedule() {
+  await fetch(`/api/${currentAccount}/schedule`,{method:'DELETE'}).catch(()=>{});
+  document.getElementById('btn-cancel-schedule').style.display='none';
+  document.getElementById('schedule-status').innerHTML='<span style="font-size:12px;color:var(--muted)">Planification annulée.</span>';
+  if (scheduleTimer) clearInterval(scheduleTimer);
+}
+
+function startScheduleCountdown(dt) {
+  if (scheduleTimer) clearInterval(scheduleTimer);
+  const el = document.getElementById('schedule-status');
+  const tick = () => {
+    const diff = dt - Date.now();
+    if (diff <= 0) { el.innerHTML='<span style="font-size:12px;color:var(--green)">▶ Démarrage en cours...</span>'; clearInterval(scheduleTimer); return; }
+    const h=Math.floor(diff/3600000),m=Math.floor((diff%3600000)/60000),s=Math.floor((diff%60000)/1000);
+    el.innerHTML=`<span style="font-size:12px;color:var(--purple)">📅 Démarrage dans <strong>${h>0?h+'h ':''} ${m>0?String(m).padStart(2,'0')+'min ':''}${String(s).padStart(2,'0')}s</strong> — ${dt.toLocaleString('fr-FR')}</span>`;
+  };
+  tick(); scheduleTimer = setInterval(tick, 1000);
+}
+
+/* ═══════════════════════════════════════════════════
+   TEST MESSAGE
+═══════════════════════════════════════════════════ */
+async function sendTestMessage() {
+  const phone = document.getElementById('test-phone').value.trim();
+  const msg   = document.getElementById('test-msg').value.trim() || 'Test depuis WA Manager 🤖';
+  if (!phone) { document.getElementById('test-result').innerHTML='<span class="badge badge-red">⚠️ Entrez un numéro</span>'; return; }
+  document.getElementById('test-result').innerHTML='<span style="color:var(--muted)">⏳ Envoi...</span>';
+  const r = await fetch(`/api/${currentAccount}/test-message`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phone,message:msg})}).then(r=>r.json()).catch(()=>({ok:false}));
+  document.getElementById('test-result').innerHTML = r.ok
+    ? '<span class="badge badge-green">✓ Message envoyé !</span>'
+    : `<span class="badge badge-red">Erreur : ${r.error||'inconnue'}</span>`;
+}
+
+/* ═══════════════════════════════════════════════════
+   QUEUE PAGE
+═══════════════════════════════════════════════════ */
+async function loadQueue() {
+  try {
+    const r = await fetch(`/api/${currentAccount}/queue?limit=500`).then(r=>r.json());
+    queueData = Array.isArray(r) ? r : (r.items||r.queue||[]);
+    queuePage = 1;
+    renderQueue();
+  } catch(e) { document.getElementById('queue-table').innerHTML='<tr><td colspan="5" style="color:var(--red);text-align:center;padding:20px">Erreur de chargement</td></tr>'; }
+}
+
+function setStatusFilter(status, btn) {
+  queueFilter = status;
+  queuePage = 1;
+  document.querySelectorAll('.filter-btn').forEach(b=>b.classList.remove('active'));
+  btn.classList.add('active');
+  renderQueue();
+}
+
+function filterQueue() {
+  queueSearch = document.getElementById('queue-search').value.toLowerCase();
+  queuePage = 1;
+  renderQueue();
+}
+
+function renderQueue() {
+  let filtered = queueData;
+  if (queueFilter !== 'all') filtered = filtered.filter(c=>c.status===queueFilter);
+  if (queueSearch) filtered = filtered.filter(c=>
+    String(c.phone||c.telephone||'').includes(queueSearch) ||
+    String(c.prenom||c.name||'').toLowerCase().includes(queueSearch) ||
+    String(c.nom||'').toLowerCase().includes(queueSearch)
+  );
+
+  const total = filtered.length;
+  document.getElementById('queue-count-label').textContent = `${total} contact${total>1?'s':''}`;
+
+  const pages = Math.ceil(total/Q_PER_PAGE)||1;
+  const page = filtered.slice((queuePage-1)*Q_PER_PAGE, queuePage*Q_PER_PAGE);
+
+  const tbody = document.getElementById('queue-table');
+  if (!page.length) {
+    tbody.innerHTML=`<tr><td colspan="5"><div class="empty-state"><div style="font-size:32px">🔍</div><p>Aucun contact pour ce filtre.</p></div></td></tr>`;
+  } else {
+    tbody.innerHTML = page.map(c=>{
+      const phone = c.phone||c.telephone||'';
+      const prenom = c.prenom||c.name||'';
+      const nom = c.nom||'';
+      const shortMsg = (c.message||'').substring(0,40)+(c.message&&c.message.length>40?'…':'');
+      const sentAt = c.sentAt ? new Date(c.sentAt).toLocaleString('fr-FR') : '—';
+      return `<tr>
+        <td style="font-family:monospace;font-size:12px">${phone}</td>
+        <td>${prenom?`<strong>${prenom}</strong>${nom?' '+nom:''}`:'-'}</td>
+        <td>${statusBadge(c.status||'pending')}</td>
+        <td style="color:var(--muted);max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${(c.message||'').replace(/"/g,'&quot;')}">${shortMsg||'—'}</td>
+        <td style="font-size:11px;color:var(--muted)">${sentAt}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  // Pagination
+  const pg = document.getElementById('queue-pagination');
+  if (pages <= 1) { pg.innerHTML=''; return; }
+  let html='';
+  if (queuePage>1) html+=`<button class="btn btn-ghost" style="padding:5px 10px;font-size:12px" onclick="goQueuePage(${queuePage-1})">← Préc</button>`;
+  html+=`<span style="font-size:12px;color:var(--muted);align-self:center">Page ${queuePage} / ${pages}</span>`;
+  if (queuePage<pages) html+=`<button class="btn btn-ghost" style="padding:5px 10px;font-size:12px" onclick="goQueuePage(${queuePage+1})">Suiv →</button>`;
+  pg.innerHTML=html;
+}
+
+function goQueuePage(n) { queuePage=n; renderQueue(); document.getElementById('page-queue').scrollTop=0; }
+
+function exportQueueFiltered() {
+  const status = queueFilter !== 'all' ? `?status=${queueFilter}` : '';
+  window.open(`/api/${currentAccount}/export${status}`, '_blank');
+}
+
+/* ═══════════════════════════════════════════════════
+   MULTI-CSV IMPORT
+═══════════════════════════════════════════════════ */
+function handleDragOver(e) { e.preventDefault(); document.getElementById('drop-zone').style.borderColor='var(--primary)'; }
+function handleDrop(e) { e.preventDefault(); document.getElementById('drop-zone').style.borderColor=''; if(e.dataTransfer.files) addCSVFiles(e.dataTransfer.files); }
+
+function handleCSVFiles(files) { addCSVFiles(files); }
+
+function addCSVFiles(files) {
+  for (const f of files) {
+    if (!f.name.endsWith('.csv')) continue;
+    if (pendingCSVFiles.find(x=>x.name===f.name)) continue; // skip dupe filename
+    pendingCSVFiles.push(f);
+  }
+  renderCSVFileList();
+}
+
+function removeCSVFile(name) {
+  pendingCSVFiles = pendingCSVFiles.filter(f=>f.name!==name);
+  renderCSVFileList();
+}
+
+function clearCSVFiles() {
+  pendingCSVFiles = [];
+  document.getElementById('csv-file').value='';
+  renderCSVFileList();
+}
+
+function renderCSVFileList() {
+  const list = document.getElementById('csv-file-list');
+  const mergeInfo = document.getElementById('merge-info');
+  const btnImport = document.getElementById('btn-import-all');
+  const btnClear = document.getElementById('btn-clear-files');
+  if (!pendingCSVFiles.length) {
+    list.innerHTML=''; mergeInfo.style.display='none';
+    btnImport.style.display='none'; btnClear.style.display='none';
+    document.getElementById('dropzone-text').textContent='📄 Glissez un ou plusieurs CSV ici, ou cliquez';
+    return;
+  }
+  list.innerHTML = pendingCSVFiles.map(f=>`
+    <div class="csv-file-item">
+      <span>📄 ${f.name} <span style="color:var(--faint)">(${(f.size/1024).toFixed(1)} KB)</span></span>
+      <span class="remove-csv" onclick="removeCSVFile('${f.name}')">✕</span>
+    </div>`).join('');
+  mergeInfo.style.display = pendingCSVFiles.length>1 ? 'flex' : 'none';
+  document.getElementById('merge-info-text').textContent = pendingCSVFiles.length > 1
+    ? `${pendingCSVFiles.length} fichiers sélectionnés — les doublons seront ignorés automatiquement.`
+    : '1 fichier sélectionné.';
+  document.getElementById('dropzone-text').textContent=`✓ ${pendingCSVFiles.length} fichier${pendingCSVFiles.length>1?'s':''} sélectionné${pendingCSVFiles.length>1?'s':''}`;
+  btnImport.style.display='inline-flex'; btnClear.style.display='inline-flex';
+}
+
+async function importAllCSV() {
+  const message = document.getElementById('import-message').value.trim();
+  const link    = document.getElementById('import-link').value.trim();
+  if (!message) { document.getElementById('import-result').innerHTML='<span class="badge badge-red">⚠️ Écrivez un message</span>'; return; }
+  if (!pendingCSVFiles.length) return;
+
+  const btn = document.getElementById('btn-import-all');
+  btn.disabled=true; btn.textContent='⏳ Import en cours...';
+  let totalAdded=0, totalSkipped=0, errors=[];
+
+  for (const file of pendingCSVFiles) {
+    const fd=new FormData(); fd.append('file',file); fd.append('message',message); fd.append('merge','true');
+    if(link) fd.append('link',link);
+    try {
+      const r=await fetch(`/api/${currentAccount}/import`,{method:'POST',body:fd}).then(r=>r.json());
+      if(r.ok){ totalAdded+=r.added||0; totalSkipped+=(r.skipped||0); }
+      else errors.push(file.name+': '+(r.error||'erreur'));
+    } catch(e){ errors.push(file.name+': erreur réseau'); }
+  }
+
+  btn.disabled=false; btn.textContent='📤 Importer tous les fichiers';
+  let html=`<span class="badge badge-green">✓ ${totalAdded} contacts ajoutés`;
+  if(totalSkipped) html+=` · ${totalSkipped} doublons ignorés`;
+  html+=`${link?' 🔗 avec lien':''}</span>`;
+  if(errors.length) html+=`<div style="margin-top:6px;font-size:11px;color:var(--red)">${errors.join('<br>')}</div>`;
+  document.getElementById('import-result').innerHTML=html;
+  clearCSVFiles();
+}
+
+function updatePreview() {
+  const msg  = document.getElementById('import-message').value;
+  const link = document.getElementById('import-link').value.trim();
+  document.getElementById('msg-count').textContent = msg.length+' caractères';
+  const p = document.getElementById('msg-preview');
+  // Show preview with {prénom} replaced by a sample
+  const preview = msg.replace(/\{prénom\}/gi,'Marie').replace(/\{nom\}/gi,'Dupont').replace(/\{prenom\}/gi,'Marie');
+  if (msg.trim()) { p.style.color='var(--text)'; p.textContent=preview; }
+  else { p.style.color='var(--muted)'; p.textContent='Votre message apparaîtra ici...'; }
+  const linkWrap = document.getElementById('link-preview-wrap');
+  const linkInfo = document.getElementById('link-info');
+  if (link) {
+    linkInfo.style.display='flex';
+    linkWrap.innerHTML = `<div class="link-preview-box">🔗 <a href="${link}" target="_blank" rel="noopener">${link}</a></div>`;
+  } else { linkInfo.style.display='none'; linkWrap.innerHTML=''; }
+}
+
+/* ═══════════════════════════════════════════════════
+   SETTINGS
+═══════════════════════════════════════════════════ */
 async function setLimit() {
   const limit = parseInt(document.getElementById('limit-input').value);
   if (!limit || limit < 1 || limit > 1000) return alert('Entrez une valeur entre 1 et 1000');
-  const r = await fetch(`/api/${currentAccount}/set-limit`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ limit }) }).then(r=>r.json());
-  if (r.ok) {
-    const el = document.getElementById('limit-saved');
-    el.style.display = 'inline';
-    setTimeout(() => el.style.display='none', 2000);
-  }
+  const r = await fetch(`/api/${currentAccount}/set-limit`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({limit})}).then(r=>r.json());
+  if (r.ok) { const el=document.getElementById('limit-saved'); el.style.display='inline'; setTimeout(()=>el.style.display='none',2000); }
 }
 
 async function loadSettings() {
   try {
     const cfg = await fetch('/api/config').then(r=>r.json());
-    document.getElementById('set-min-delay').value    = cfg.minDelay  || 90;
-    document.getElementById('set-max-delay').value    = cfg.maxDelay  || 180;
-    document.getElementById('set-session-size').value = cfg.sessionSize|| 15;
+    document.getElementById('set-min-delay').value    = cfg.minDelay   || 90;
+    document.getElementById('set-max-delay').value    = cfg.maxDelay   || 180;
+    document.getElementById('set-session-size').value = cfg.sessionSize || 15;
     document.getElementById('set-auto-resume').checked= cfg.autoResume !== false;
   } catch(e){}
 }
@@ -497,12 +961,12 @@ async function saveSettings() {
     autoResume:  document.getElementById('set-auto-resume').checked
   };
   const r = await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(r=>r.json());
-  if (r.ok) {
-    const el = document.getElementById('settings-saved');
-    el.style.display='inline'; setTimeout(()=>el.style.display='none',2500);
-  }
+  if (r.ok) { const el=document.getElementById('settings-saved'); el.style.display='inline'; setTimeout(()=>el.style.display='none',2500); }
 }
 
+/* ═══════════════════════════════════════════════════
+   OVERVIEW
+═══════════════════════════════════════════════════ */
 async function renderOverview() {
   const grid=document.getElementById('overview-grid');
   grid.innerHTML='<div style="color:var(--muted);font-size:13px;padding:12px">Chargement...</div>';
@@ -525,32 +989,26 @@ async function renderOverview() {
   }).join('');
 }
 
-async function startBot()  { const r=await fetch(`/api/${currentAccount}/start`,{method:'POST'}).then(r=>r.json()); if(!r.ok) alert('Erreur : '+r.error); }
-async function pauseBot()  { await fetch(`/api/${currentAccount}/pause`,{method:'POST'}); }
-async function clearQueue(){ if(!confirm('Vider la queue du compte '+currentAccount+' ?')) return; await fetch(`/api/${currentAccount}/clear`,{method:'POST'}); }
-function exportCSV()       { window.location.href=`/api/${currentAccount}/export`; }
-
-async function importCSV() {
-  const file    = document.getElementById('csv-file').files[0];
-  const message = document.getElementById('import-message').value.trim();
-  const link    = document.getElementById('import-link').value.trim();
-  if (!file) return;
-  if (!message) { document.getElementById('import-result').innerHTML='<span class="badge badge-red">⚠️ Écrivez un message</span>'; return; }
-  document.getElementById('dropzone-text').textContent='⏳ Import...';
-  const fd=new FormData(); fd.append('file',file); fd.append('message',message); if(link) fd.append('link',link);
-  const r=await fetch(`/api/${currentAccount}/import`,{method:'POST',body:fd}).then(r=>r.json());
-  document.getElementById('dropzone-text').textContent=file.name;
-  document.getElementById('import-result').innerHTML=r.ok
-    ? `<span class="badge badge-green">✓ ${r.added} contacts · ~${formatDuration(r.added*AVG)}${link?' 🔗 avec lien':''}</span>`
-    : `<span class="badge badge-red">Erreur : ${r.error}</span>`;
-}
-
+/* ═══════════════════════════════════════════════════
+   GROUPS
+═══════════════════════════════════════════════════ */
 async function loadGroups() {
   const groups=await fetch(`/api/${currentAccount}/groups`).then(r=>r.json());
   const tbody=document.getElementById('groups-table');
   if(!groups.length){tbody.innerHTML='<tr><td colspan="3" style="color:var(--muted);text-align:center;padding:20px">Aucun groupe</td></tr>';return;}
-  tbody.innerHTML=groups.map(g=>`<tr><td><strong>${g.name}</strong></td><td>${g.count}</td><td><a href="/api/${currentAccount}/export-group/${encodeURIComponent(g.name)}" class="btn btn-ghost" style="padding:5px 11px;font-size:12px">Exporter</a></td></tr>`).join('');
+  tbody.innerHTML=groups.map(g=>`<tr><td><strong>${g.name}</strong></td><td>${g.count}</td><td><a href="/api/${currentAccount}/export-group/${encodeURIComponent(g.name)}" class="btn btn-ghost" style="padding:5px 11px;font-size:12px" target="_blank">Exporter</a></td></tr>`).join('');
 }
+
+/* ═══════════════════════════════════════════════════
+   INIT
+═══════════════════════════════════════════════════ */
+updateNotifUI();
+// Default datetime = tomorrow 09:00
+(function(){
+  const dt = document.getElementById('schedule-dt');
+  const d = new Date(); d.setDate(d.getDate()+1); d.setHours(9,0,0,0);
+  dt.value = d.toISOString().slice(0,16);
+})();
 
 fetchStatus();
 setInterval(fetchStatus, 2000);
