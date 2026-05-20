@@ -21,10 +21,24 @@ const SESSION_PAUSE_MIN = parseInt(process.env.SESSION_PAUSE_MIN || '600');
 const SESSION_PAUSE_MAX = parseInt(process.env.SESSION_PAUSE_MAX || '1200');
 const TYPING_MIN_MS     = parseInt(process.env.TYPING_MIN_MS     || '2000');
 const TYPING_MAX_MS     = parseInt(process.env.TYPING_MAX_MS     || '6000');
+// Délai entre le texte et le lien (ms) — assez long pour que WA traite le 1er msg
+const LINK_SPLIT_DELAY  = parseInt(process.env.LINK_SPLIT_DELAY  || '4000');
 
 // ─── Utilitaires ─────────────────────────────────────────────────────────────
 const rand  = (a, b) => a + Math.random() * (b - a);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// Détecte une URL dans un texte et retourne { text, url } ou null si pas d'URL
+const URL_RE = /(https?:\/\/[^\s]+)/i;
+function splitMessageAndLink(msg) {
+  const match = msg.match(URL_RE);
+  if (!match) return null;
+  const url    = match[1];
+  const before = msg.slice(0, match.index).trim();
+  const after  = msg.slice(match.index + url.length).trim();
+  const text   = [before, after].filter(Boolean).join('\n').trim();
+  return { text, url };
+}
 
 function removeLocks(dir) {
   if (!fs.existsSync(dir)) return;
@@ -43,7 +57,7 @@ function removeLocks(dir) {
 // ─── Classe BotAccount : un compte WhatsApp indépendant ──────────────────────
 class BotAccount {
   constructor(id) {
-    this.id         = id;  // 1 ou 2
+    this.id         = id;
     this.authPath   = `/app/.wwebjs_auth/account${id}`;
     this.dataFile   = path.join(__dirname, 'data', `queue_${id}.json`);
     this.client     = null;
@@ -92,8 +106,6 @@ class BotAccount {
   }
 
   // ── Reprise automatique après crash ──────────────────────────────────────
-  // Si des contacts sont en status 'processing' (crash en cours d'envoi),
-  // on les remet en 'pending' pour qu'ils soient renvoyés.
   _autoResume() {
     let fixed = 0;
     this.state.queue.forEach(c => {
@@ -137,7 +149,6 @@ class BotAccount {
       this.retryCount = 0;
       this.state.ready = true; this.state.qr = null;
       this.log('WhatsApp connecté ✅', 'success');
-      // Reprise automatique si queue en cours
       const pending = this.state.queue.filter(c => c.status === 'pending').length;
       if (pending > 0 && !this.state.running) {
         this.log(`▶️ Reprise automatique : ${pending} contacts restants`, 'warn');
@@ -198,6 +209,33 @@ class BotAccount {
     } catch(e) {}
   }
 
+  // ── Envoi d'un message (avec séparation lien si nécessaire) ──────────────
+  // Stratégie :
+  //   1. Si le message contient une URL → on envoie le texte d'abord,
+  //      on attend LINK_SPLIT_DELAY ms, puis on envoie le lien seul.
+  //      WhatsApp génère alors un aperçu cliquable sur le 2ème message.
+  //   2. Si pas d'URL → envoi normal en un seul message.
+  async _sendMessage(chatId, rawMsg) {
+    const parts = splitMessageAndLink(rawMsg);
+    if (parts && parts.text) {
+      // Texte + lien séparés
+      await this._typing(await this.client.getChatById(chatId));
+      await this.client.sendMessage(chatId, parts.text);
+      await sleep(LINK_SPLIT_DELAY + rand(500, 1500));
+      await this.client.sendMessage(chatId, parts.url);
+      this.log(`🔗 Lien envoyé séparément (${LINK_SPLIT_DELAY}ms après le texte)`, 'info');
+    } else if (parts && !parts.text) {
+      // Message = lien seul, pas besoin de séparer
+      await this._typing(await this.client.getChatById(chatId));
+      await this.client.sendMessage(chatId, parts.url);
+    } else {
+      // Pas d'URL dans le message
+      const chat = await this.client.getChatById(chatId);
+      await this._typing(chat);
+      await this.client.sendMessage(chatId, rawMsg);
+    }
+  }
+
   // ── Boucle d'envoi ───────────────────────────────────────────────────────
   async runQueue() {
     if (this.state.running) return;
@@ -216,7 +254,7 @@ class BotAccount {
       const contact = this.state.queue.find(c => c.status === 'pending');
       if (!contact) break;
       contact.status = 'processing';
-      this._saveQueue();  // sauvegarde immédiate avant envoi
+      this._saveQueue();
 
       try {
         const number = contact.phone.replace(/\D/g,'');
@@ -229,16 +267,14 @@ class BotAccount {
           await sleep(rand(3000, 8000));
           continue;
         }
-        const chat = await this.client.getChatById(chatId);
         await sleep(rand(500, 2000));
-        await this._typing(chat);
         const msg = (contact.message || '').trim() || process.env.DEFAULT_MESSAGE || 'Bonjour ! 👋';
-        await this.client.sendMessage(chatId, msg);
+        await this._sendMessage(chatId, msg);
         contact.status = 'done';
         this.state.stats.sent++;
         this.state.sessionCount++;
         this.log(`✅ Envoyé à +${number} (${this.state.sessionCount % SESSION_SIZE || SESSION_SIZE}/${SESSION_SIZE})`, 'success');
-        this._saveQueue();  // sauvegarde après chaque envoi réussi
+        this._saveQueue();
         await this._delayMsg();
       } catch(err) {
         contact.status = 'failed'; this.state.stats.failed++;
@@ -373,11 +409,10 @@ app.get('/api/:account/export-group/:name', async (req, res) => {
 });
 
 // Compat routes sans préfixe account (bot 1 par défaut)
-app.get('/api/status',         (req, res) => res.json(bots[1].getStatus()));
-app.post('/api/start',         (req, res) => { bots[1].state.paused=false; bots[1].runQueue(); res.json({ok:true}); });
-app.post('/api/pause',         (req, res) => { bots[1].state.paused=!bots[1].state.paused; res.json({ok:true}); });
-app.post('/api/clear',         (req, res) => { bots[1].clear(); res.json({ok:true}); });
-app.get('/api/export',         (req, res) => { req.params.account='1'; });
-app.get('/api/groups',         async (req, res) => { if(!bots[1].state.ready) return res.json([]); const c=await bots[1].client.getChats(); res.json(c.filter(x=>x.isGroup).map(x=>({name:x.name,count:x.participants?.length||0}))); });
+app.get('/api/status',  (req, res) => res.json(bots[1].getStatus()));
+app.post('/api/start',  (req, res) => { bots[1].state.paused=false; bots[1].runQueue(); res.json({ok:true}); });
+app.post('/api/pause',  (req, res) => { bots[1].state.paused=!bots[1].state.paused; res.json({ok:true}); });
+app.post('/api/clear',  (req, res) => { bots[1].clear(); res.json({ok:true}); });
+app.get('/api/groups',  async (req, res) => { if(!bots[1].state.ready) return res.json([]); const c=await bots[1].client.getChats(); res.json(c.filter(x=>x.isGroup).map(x=>({name:x.name,count:x.participants?.length||0}))); });
 
 app.listen(PORT, () => console.log(`WhatsApp Manager → http://localhost:${PORT}`));
