@@ -12,36 +12,27 @@ const PORT = process.env.PORT || 3000;
 const DATA_FILE = path.join(__dirname, 'data', 'queue.json');
 const AUTH_PATH = '/app/.wwebjs_auth';
 
-// --- Supprime les fichiers lock de Chromium au démarrage ---
-function clearChromiumLocks() {
+// Supprime récursivement tous les fichiers SingletonLock dans un dossier
+function removeLocks(dir) {
+  if (!fs.existsSync(dir)) return;
   try {
-    const lockFiles = [
-      path.join(AUTH_PATH, 'SingletonLock'),
-      path.join(AUTH_PATH, 'SingletonCookie'),
-      path.join(AUTH_PATH, 'SingletonSocket'),
-    ];
-    // Cherche aussi dans les sous-dossiers session-*
-    const searchDirs = [AUTH_PATH];
-    try {
-      const entries = fs.readdirSync(AUTH_PATH, { withFileTypes: true });
-      entries.filter(e => e.isDirectory()).forEach(e => searchDirs.push(path.join(AUTH_PATH, e.name)));
-    } catch(e) {}
-
-    for (const dir of searchDirs) {
-      for (const lock of ['SingletonLock', 'SingletonCookie', 'SingletonSocket']) {
-        const p = path.join(dir, lock);
-        if (fs.existsSync(p)) {
-          fs.unlinkSync(p);
-          console.log(`[INIT] Lock supprimé : ${p}`);
-        }
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    for (const e of entries) {
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) {
+        removeLocks(full);
+      } else if (['SingletonLock','SingletonCookie','SingletonSocket'].includes(e.name)) {
+        fs.unlinkSync(full);
+        console.log(`[INIT] Supprimé : ${full}`);
       }
     }
   } catch(e) {
-    console.log('[INIT] Erreur suppression locks:', e.message);
+    console.log('[INIT] removeLocks error:', e.message);
   }
 }
 
-clearChromiumLocks();
+// Nettoyage au démarrage
+removeLocks(AUTH_PATH);
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
@@ -70,56 +61,65 @@ function addLog(msg, type = 'info') {
 }
 loadQueue();
 
-const client = new Client({
-  authStrategy: new LocalAuth({ dataPath: AUTH_PATH }),
-  puppeteer: {
-    headless: true,
-    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium',
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-gpu',
-      '--no-first-run',
-      '--no-zygote',
-      '--single-process',
-      '--disable-extensions',
-      '--disable-background-networking',
-      '--disable-sync',
-      '--metrics-recording-only',
-      '--mute-audio',
-      '--no-default-browser-check',
-      '--safebrowsing-disable-auto-update',
-    ]
-  }
-});
+function createClient() {
+  return new Client({
+    authStrategy: new LocalAuth({ dataPath: AUTH_PATH }),
+    puppeteer: {
+      headless: true,
+      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium',
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--no-first-run',
+        '--no-zygote',
+        '--single-process',
+        '--disable-extensions',
+        '--disable-background-networking',
+        '--disable-sync',
+        '--mute-audio',
+        '--no-default-browser-check',
+        '--safebrowsing-disable-auto-update',
+      ]
+    }
+  });
+}
 
-client.on('qr', async (qr) => {
-  state.qr = await qrcode.toDataURL(qr);
-  state.ready = false;
-  addLog('QR Code généré — scannez-le sur le dashboard', 'warn');
-});
-client.on('ready', () => {
-  state.ready = true; state.qr = null;
-  addLog('WhatsApp connecté et prêt ✅', 'success');
-});
-client.on('disconnected', (reason) => {
-  state.ready = false; state.running = false;
-  addLog(`WhatsApp déconnecté : ${reason}`, 'error');
-  // Supprimer les locks puis reinitialiser
-  setTimeout(() => { clearChromiumLocks(); client.initialize(); }, 5000);
-});
-client.on('auth_failure', (msg) => {
-  addLog(`Erreur auth : ${msg}`, 'error');
-});
+let client = createClient();
 
+function bindClientEvents(c) {
+  c.on('qr', async (qr) => {
+    state.qr = await qrcode.toDataURL(qr);
+    state.ready = false;
+    addLog('QR Code généré — scannez-le sur le dashboard', 'warn');
+  });
+  c.on('ready', () => {
+    state.ready = true; state.qr = null;
+    addLog('WhatsApp connecté et prêt ✅', 'success');
+  });
+  c.on('disconnected', (reason) => {
+    state.ready = false; state.running = false;
+    addLog(`WhatsApp déconnecté : ${reason}`, 'error');
+    setTimeout(() => {
+      removeLocks(AUTH_PATH);
+      client = createClient();
+      bindClientEvents(client);
+      client.initialize().catch(err => addLog(`Reconnexion échouée : ${err.message}`, 'error'));
+    }, 8000);
+  });
+  c.on('auth_failure', (msg) => addLog(`Erreur auth : ${msg}`, 'error'));
+}
+
+bindClientEvents(client);
 client.initialize().catch(err => {
   addLog(`Erreur initialisation : ${err.message}`, 'error');
   console.error(err);
-  // Retenter après 10s
   setTimeout(() => {
-    clearChromiumLocks();
-    client.initialize().catch(console.error);
+    removeLocks(AUTH_PATH);
+    client = createClient();
+    bindClientEvents(client);
+    client.initialize().catch(e => addLog(`Retry échoué : ${e.message}`, 'error'));
   }, 10000);
 });
 
@@ -223,6 +223,12 @@ app.post('/api/clear', (req, res) => {
   state.queue = []; state.stats = { sent: 0, failed: 0, skipped: 0 };
   saveQueue(); addLog('🗑️ Queue vidée', 'warn');
   res.json({ ok: true });
+});
+
+// Endpoint debug : force suppression des locks
+app.post('/api/fix-locks', (req, res) => {
+  removeLocks(AUTH_PATH);
+  res.json({ ok: true, msg: 'Locks supprimés' });
 });
 
 app.get('/api/export-group/:name', async (req, res) => {
