@@ -10,6 +10,38 @@ const { stringify } = require('csv-stringify/sync');
 const app  = express();
 const PORT = process.env.PORT || 3000;
 const DATA_FILE = path.join(__dirname, 'data', 'queue.json');
+const AUTH_PATH = '/app/.wwebjs_auth';
+
+// --- Supprime les fichiers lock de Chromium au démarrage ---
+function clearChromiumLocks() {
+  try {
+    const lockFiles = [
+      path.join(AUTH_PATH, 'SingletonLock'),
+      path.join(AUTH_PATH, 'SingletonCookie'),
+      path.join(AUTH_PATH, 'SingletonSocket'),
+    ];
+    // Cherche aussi dans les sous-dossiers session-*
+    const searchDirs = [AUTH_PATH];
+    try {
+      const entries = fs.readdirSync(AUTH_PATH, { withFileTypes: true });
+      entries.filter(e => e.isDirectory()).forEach(e => searchDirs.push(path.join(AUTH_PATH, e.name)));
+    } catch(e) {}
+
+    for (const dir of searchDirs) {
+      for (const lock of ['SingletonLock', 'SingletonCookie', 'SingletonSocket']) {
+        const p = path.join(dir, lock);
+        if (fs.existsSync(p)) {
+          fs.unlinkSync(p);
+          console.log(`[INIT] Lock supprimé : ${p}`);
+        }
+      }
+    }
+  } catch(e) {
+    console.log('[INIT] Erreur suppression locks:', e.message);
+  }
+}
+
+clearChromiumLocks();
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
@@ -39,27 +71,57 @@ function addLog(msg, type = 'info') {
 loadQueue();
 
 const client = new Client({
-  authStrategy: new LocalAuth({ dataPath: '/app/.wwebjs_auth' }),
+  authStrategy: new LocalAuth({ dataPath: AUTH_PATH }),
   puppeteer: {
     headless: true,
-    args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage','--disable-gpu','--no-first-run','--no-zygote','--single-process']
+    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium',
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--no-first-run',
+      '--no-zygote',
+      '--single-process',
+      '--disable-extensions',
+      '--disable-background-networking',
+      '--disable-sync',
+      '--metrics-recording-only',
+      '--mute-audio',
+      '--no-default-browser-check',
+      '--safebrowsing-disable-auto-update',
+    ]
   }
 });
 
 client.on('qr', async (qr) => {
   state.qr = await qrcode.toDataURL(qr);
   state.ready = false;
-  addLog('QR Code generé — scannez-le sur le dashboard', 'warn');
+  addLog('QR Code généré — scannez-le sur le dashboard', 'warn');
 });
 client.on('ready', () => {
   state.ready = true; state.qr = null;
   addLog('WhatsApp connecté et prêt ✅', 'success');
 });
-client.on('disconnected', () => {
+client.on('disconnected', (reason) => {
   state.ready = false; state.running = false;
-  addLog('WhatsApp déconnecté ❌', 'error');
+  addLog(`WhatsApp déconnecté : ${reason}`, 'error');
+  // Supprimer les locks puis reinitialiser
+  setTimeout(() => { clearChromiumLocks(); client.initialize(); }, 5000);
 });
-client.initialize();
+client.on('auth_failure', (msg) => {
+  addLog(`Erreur auth : ${msg}`, 'error');
+});
+
+client.initialize().catch(err => {
+  addLog(`Erreur initialisation : ${err.message}`, 'error');
+  console.error(err);
+  // Retenter après 10s
+  setTimeout(() => {
+    clearChromiumLocks();
+    client.initialize().catch(console.error);
+  }, 10000);
+});
 
 const MIN_DELAY_S = parseInt(process.env.MIN_DELAY_S || '45');
 const MAX_DELAY_S = parseInt(process.env.MAX_DELAY_S || '120');
