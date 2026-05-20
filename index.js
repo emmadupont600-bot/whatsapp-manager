@@ -13,23 +13,22 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 const upload = multer({ dest: 'uploads/' });
 
-// ─── Paramètres anti-détection ───────────────────────────────────────────────
-const MIN_DELAY_S        = parseInt(process.env.MIN_DELAY_S        || '90');
-const MAX_DELAY_S        = parseInt(process.env.MAX_DELAY_S        || '180');
-const SESSION_SIZE       = parseInt(process.env.SESSION_SIZE       || '15');
-const SESSION_PAUSE_MIN  = parseInt(process.env.SESSION_PAUSE_MIN  || '600');
-const SESSION_PAUSE_MAX  = parseInt(process.env.SESSION_PAUSE_MAX  || '1200');
-const TYPING_MIN_MS      = parseInt(process.env.TYPING_MIN_MS      || '2000');
-const TYPING_MAX_MS      = parseInt(process.env.TYPING_MAX_MS      || '6000');
-// Délai ALÉATOIRE entre le texte et le lien — réduit les patterns détectables
-const LINK_DELAY_MIN_MS  = parseInt(process.env.LINK_DELAY_MIN_MS  || '8000');
-const LINK_DELAY_MAX_MS  = parseInt(process.env.LINK_DELAY_MAX_MS  || '15000');
+// ─── Paramètres ─────────────────────────────────────────────────────────────
+const MIN_DELAY_S       = parseInt(process.env.MIN_DELAY_S       || '90');
+const MAX_DELAY_S       = parseInt(process.env.MAX_DELAY_S       || '180');
+const SESSION_SIZE      = parseInt(process.env.SESSION_SIZE      || '15');
+const SESSION_PAUSE_MIN = parseInt(process.env.SESSION_PAUSE_MIN || '600');
+const SESSION_PAUSE_MAX = parseInt(process.env.SESSION_PAUSE_MAX || '1200');
+const TYPING_MIN_MS     = parseInt(process.env.TYPING_MIN_MS     || '2000');
+const TYPING_MAX_MS     = parseInt(process.env.TYPING_MAX_MS     || '6000');
+const LINK_DELAY_MIN_MS = parseInt(process.env.LINK_DELAY_MIN_MS || '8000');
+const LINK_DELAY_MAX_MS = parseInt(process.env.LINK_DELAY_MAX_MS || '15000');
+// Limite journalière avant relais vers l'autre compte
+const DAILY_LIMIT       = parseInt(process.env.DAILY_LIMIT       || '300');
 
-// ─── Utilitaires ─────────────────────────────────────────────────────────────
 const rand  = (a, b) => a + Math.random() * (b - a);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-// Détecte la première URL dans un texte
 const URL_RE = /(https?:\/\/[^\s]+)/i;
 function splitMessageAndLink(msg) {
   const match = msg.match(URL_RE);
@@ -47,15 +46,12 @@ function removeLocks(dir) {
     for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
       const full = path.join(dir, e.name);
       if (e.isDirectory()) removeLocks(full);
-      else if (['SingletonLock','SingletonCookie','SingletonSocket'].includes(e.name)) {
-        fs.unlinkSync(full);
-        console.log(`[INIT] Supprimé : ${full}`);
-      }
+      else if (['SingletonLock','SingletonCookie','SingletonSocket'].includes(e.name)) fs.unlinkSync(full);
     }
-  } catch(e) { console.log('[INIT] removeLocks error:', e.message); }
+  } catch(e) {}
 }
 
-// ─── Classe BotAccount ───────────────────────────────────────────────────────
+// ─── BotAccount ──────────────────────────────────────────────────────────────
 class BotAccount {
   constructor(id) {
     this.id         = id;
@@ -65,7 +61,7 @@ class BotAccount {
     this.retryCount = 0;
     this.state = {
       qr: null, ready: false, running: false, paused: false,
-      queue: [], sessionCount: 0,
+      queue: [], sessionCount: 0, dailySent: 0, dailyDate: '',
       log: [], stats: { sent: 0, failed: 0, skipped: 0 }
     };
     this._loadQueue();
@@ -77,9 +73,13 @@ class BotAccount {
     if (fs.existsSync(this.dataFile)) {
       try {
         const data = JSON.parse(fs.readFileSync(this.dataFile, 'utf-8'));
-        this.state.queue        = data.queue  || [];
-        this.state.stats        = data.stats  || { sent: 0, failed: 0, skipped: 0 };
+        this.state.queue        = data.queue        || [];
+        this.state.stats        = data.stats        || { sent: 0, failed: 0, skipped: 0 };
         this.state.sessionCount = data.sessionCount || 0;
+        this.state.dailySent    = data.dailySent    || 0;
+        this.state.dailyDate    = data.dailyDate    || '';
+        const today = new Date().toISOString().slice(0,10);
+        if (this.state.dailyDate !== today) { this.state.dailySent = 0; this.state.dailyDate = today; }
         const pending = this.state.queue.filter(c => c.status === 'pending').length;
         if (pending) this.log(`💾 Queue restaurée : ${pending} contacts en attente`, 'warn');
       } catch(e) { this.log(`Erreur chargement queue : ${e.message}`, 'error'); }
@@ -91,7 +91,9 @@ class BotAccount {
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(this.dataFile, JSON.stringify({
       queue: this.state.queue, stats: this.state.stats,
-      sessionCount: this.state.sessionCount, savedAt: new Date().toISOString()
+      sessionCount: this.state.sessionCount,
+      dailySent: this.state.dailySent, dailyDate: this.state.dailyDate,
+      savedAt: new Date().toISOString()
     }, null, 2));
   }
 
@@ -106,6 +108,13 @@ class BotAccount {
     let fixed = 0;
     this.state.queue.forEach(c => { if (c.status === 'processing') { c.status = 'pending'; fixed++; } });
     if (fixed > 0) { this.log(`♻️ ${fixed} contacts remis en attente après crash`, 'warn'); this._saveQueue(); }
+  }
+
+  // ── Vérifie si la limite journalière est atteinte ──────────────────────────
+  _dailyLimitReached() {
+    const today = new Date().toISOString().slice(0,10);
+    if (this.state.dailyDate !== today) { this.state.dailySent = 0; this.state.dailyDate = today; }
+    return this.state.dailySent >= DAILY_LIMIT;
   }
 
   _makeClient() {
@@ -185,17 +194,9 @@ class BotAccount {
     try { await chat.sendStateTyping(); await sleep(rand(TYPING_MIN_MS, TYPING_MAX_MS)); await chat.clearState(); } catch(e) {}
   }
 
-  // ── Envoi intelligent : texte d'abord, lien séparé avec délai aléatoire ──
-  // Le lien peut venir de :
-  //   1. contact.link (champ dédié du CSV) — prioritaire
-  //   2. Une URL détectée dans le corps du message
-  // Dans les deux cas : texte envoyé → délai 8-15s aléatoire → lien seul
-  // Résultat : WhatsApp génère un aperçu cliquable même pour les non-contacts
   async _sendMessage(chatId, rawMsg, link) {
     const chat = await this.client.getChatById(chatId);
-
     if (link && link.trim()) {
-      // Cas 1 : lien dans champ séparé
       await this._typing(chat);
       await this.client.sendMessage(chatId, rawMsg.trim());
       const delay = rand(LINK_DELAY_MIN_MS, LINK_DELAY_MAX_MS);
@@ -205,29 +206,54 @@ class BotAccount {
     } else {
       const parts = splitMessageAndLink(rawMsg);
       if (parts && parts.text) {
-        // Cas 2 : URL dans le message — on sépare
         await this._typing(chat);
         await this.client.sendMessage(chatId, parts.text);
         const delay = rand(LINK_DELAY_MIN_MS, LINK_DELAY_MAX_MS);
-        this.log(`⏱ Délai avant lien : ${(delay/1000).toFixed(1)}s`, 'info');
         await sleep(delay);
         await this.client.sendMessage(chatId, parts.url);
       } else {
-        // Cas 3 : pas de lien, envoi normal
         await this._typing(chat);
         await this.client.sendMessage(chatId, rawMsg);
       }
     }
   }
 
-  async runQueue() {
+  // ── Queue principale ───────────────────────────────────────────────────────
+  // relayBot : l'autre BotAccount vers lequel relayer si limite atteinte
+  async runQueue(relayBot) {
     if (this.state.running) return;
     this.state.running = true;
-    this.log(`🚀 Bot démarré (session ≤${SESSION_SIZE} msgs)`, 'success');
+    this.log(`🚀 Bot démarré (session ≤${SESSION_SIZE} msgs, limite/jour : ${DAILY_LIMIT})`, 'success');
 
     while (this.state.queue.some(c => c.status === 'pending')) {
       if (!this.state.ready) { await sleep(10000); continue; }
       if (this.state.paused)  { await sleep(3000);  continue; }
+
+      // ── Limite journalière atteinte → relais ──────────────────────────────
+      if (this._dailyLimitReached()) {
+        this.state.running = false;
+        const remaining = this.state.queue.filter(c => c.status === 'pending');
+        if (relayBot && relayBot.state.ready && remaining.length > 0) {
+          this.log(`🔁 Limite ${DAILY_LIMIT} msgs atteinte → relais vers Compte ${relayBot.id} (${remaining.length} contacts)`, 'warn');
+          // Copier les contacts restants dans la queue de l'autre bot
+          for (const c of remaining) {
+            const alreadyThere = relayBot.state.queue.find(x => x.phone === c.phone && x.status === 'pending');
+            if (!alreadyThere) {
+              relayBot.state.queue.push({ ...c, status: 'pending', relayedFrom: this.id, relayedAt: new Date().toISOString() });
+            }
+            c.status = 'relayed';
+          }
+          this._saveQueue();
+          relayBot._saveQueue();
+          if (!relayBot.state.running) {
+            this.log(`▶️ Démarrage automatique du Compte ${relayBot.id}`, 'success');
+            relayBot.runQueue(this);
+          }
+        } else if (remaining.length > 0) {
+          this.log(`⚠️ Limite ${DAILY_LIMIT} msgs atteinte. Compte ${relayBot ? relayBot.id : '?'} non connecté — en attente.`, 'warn');
+        }
+        break;
+      }
 
       if (this.state.sessionCount > 0 && this.state.sessionCount % SESSION_SIZE === 0) {
         this.log(`📊 Session ${Math.floor(this.state.sessionCount/SESSION_SIZE)} terminée`, 'info');
@@ -252,8 +278,11 @@ class BotAccount {
         const msg  = (contact.message || '').trim() || process.env.DEFAULT_MESSAGE || 'Bonjour ! 👋';
         const link = (contact.link    || '').trim();
         await this._sendMessage(chatId, msg, link);
-        contact.status = 'done'; this.state.stats.sent++; this.state.sessionCount++;
-        this.log(`✅ Envoyé à +${number}${link ? ' 🔗' : ''}`, 'success');
+        contact.status = 'done';
+        this.state.stats.sent++;
+        this.state.sessionCount++;
+        this.state.dailySent++;
+        this.log(`✅ Envoyé à +${number}${link ? ' 🔗' : ''} [${this.state.dailySent}/${DAILY_LIMIT}]`, 'success');
         this._saveQueue();
         await this._delayMsg();
       } catch(err) {
@@ -267,7 +296,6 @@ class BotAccount {
     this._saveQueue();
   }
 
-  // Import CSV — colonnes : telephone, message (opt.), link (opt.)
   importCSV(content, defaultMessage, defaultLink) {
     const records = csv.parse(content, { columns: true, skip_empty_lines: true });
     let added = 0;
@@ -276,8 +304,7 @@ class BotAccount {
       if (!phone || phone.length < 8) continue;
       if (this.state.queue.find(c => c.phone === phone)) continue;
       this.state.queue.push({
-        phone,
-        status:  'pending',
+        phone, status: 'pending',
         message: row.message || defaultMessage,
         link:    row.link    || defaultLink || '',
         addedAt: new Date().toISOString()
@@ -294,34 +321,44 @@ class BotAccount {
       id: this.id, ready: this.state.ready, qr: this.state.qr,
       running: this.state.running, paused: this.state.paused,
       stats: this.state.stats,
-      pending: this.state.queue.filter(c => c.status === 'pending').length,
-      total: this.state.queue.length,
+      pending:  this.state.queue.filter(c => c.status === 'pending').length,
+      relayed:  this.state.queue.filter(c => c.status === 'relayed').length,
+      total:    this.state.queue.length,
       sessionCount: this.state.sessionCount,
+      dailySent: this.state.dailySent, dailyLimit: DAILY_LIMIT,
       minDelay: MIN_DELAY_S, maxDelay: MAX_DELAY_S, sessionSize: SESSION_SIZE,
-      linkDelayMin: LINK_DELAY_MIN_MS, linkDelayMax: LINK_DELAY_MAX_MS,
       log: this.state.log.slice(0, 50)
     };
   }
 
   reset() {
     this.state.queue.forEach(c => { if (c.status !== 'done') c.status = 'pending'; });
-    this.state.stats = { sent: 0, failed: 0, skipped: 0 }; this.state.sessionCount = 0;
+    this.state.stats = { sent: 0, failed: 0, skipped: 0 };
+    this.state.sessionCount = 0; this.state.dailySent = 0;
     this._saveQueue(); this.log('🔄 Queue réinitialisée', 'warn');
   }
 
   clear() {
-    this.state.queue = []; this.state.stats = { sent: 0, failed: 0, skipped: 0 }; this.state.sessionCount = 0;
+    this.state.queue = []; this.state.stats = { sent: 0, failed: 0, skipped: 0 };
+    this.state.sessionCount = 0; this.state.dailySent = 0;
     this._saveQueue(); this.log('🗑️ Queue vidée', 'warn');
   }
 }
 
-// ─── Deux comptes ─────────────────────────────────────────────────────────────
+// ─── Deux comptes ────────────────────────────────────────────────────────────
 const bots = { 1: new BotAccount(1), 2: new BotAccount(2) };
 function getBot(req) { const id = parseInt(req.params.account || req.query.account || '1'); return bots[id] || bots[1]; }
+function otherBot(bot) { return bot.id === 1 ? bots[2] : bots[1]; }
 
-// ─── Routes API ───────────────────────────────────────────────────────────────
+// ─── Routes API ──────────────────────────────────────────────────────────────
 app.get('/api/:account/status',  (req, res) => res.json(getBot(req).getStatus()));
-app.post('/api/:account/start',  (req, res) => { const b=getBot(req); if(!b.state.ready) return res.status(400).json({ok:false,error:'Non connecté'}); b.state.paused=false; b.runQueue(); res.json({ok:true}); });
+app.post('/api/:account/start',  (req, res) => {
+  const b = getBot(req);
+  if (!b.state.ready) return res.status(400).json({ ok: false, error: 'Non connecté' });
+  b.state.paused = false;
+  b.runQueue(otherBot(b));
+  res.json({ ok: true });
+});
 app.post('/api/:account/pause',  (req, res) => { const b=getBot(req); b.state.paused=!b.state.paused; b.log(b.state.paused?'⏸️ Pause':'▶️ Reprise','warn'); res.json({ok:true,paused:b.state.paused}); });
 app.post('/api/:account/clear',  (req, res) => { getBot(req).clear(); res.json({ok:true}); });
 app.post('/api/:account/reset',  (req, res) => { getBot(req).reset(); res.json({ok:true}); });
@@ -367,7 +404,7 @@ app.get('/api/:account/export-group/:name', async (req, res) => {
 
 // Compat bot 1
 app.get('/api/status',  (req,res) => res.json(bots[1].getStatus()));
-app.post('/api/start',  (req,res) => { bots[1].state.paused=false; bots[1].runQueue(); res.json({ok:true}); });
+app.post('/api/start',  (req,res) => { bots[1].state.paused=false; bots[1].runQueue(bots[2]); res.json({ok:true}); });
 app.post('/api/pause',  (req,res) => { bots[1].state.paused=!bots[1].state.paused; res.json({ok:true}); });
 app.post('/api/clear',  (req,res) => { bots[1].clear(); res.json({ok:true}); });
 app.get('/api/groups',  async (req,res) => { if(!bots[1].state.ready) return res.json([]); const c=await bots[1].client.getChats(); res.json(c.filter(x=>x.isGroup).map(x=>({name:x.name,count:x.participants?.length||0}))); });
