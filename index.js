@@ -80,7 +80,6 @@ function createClient() {
         '--no-default-browser-check',
         '--safebrowsing-disable-auto-update',
         '--disable-features=TranslateUI',
-        '--disable-ipc-flooding-protection',
         '--memory-pressure-off',
       ]
     }
@@ -163,7 +162,10 @@ async function runQueue() {
         contact.status = 'skipped'; state.stats.skipped++;
         addLog(`⏭️ Non inscrit WhatsApp : +${number}`, 'warn');
       } else {
-        const message = contact.message || process.env.DEFAULT_MESSAGE || 'Bonjour ! 👋';
+        // Utilise le message du contact tel quel, sans fallback qui l'écrase
+        const message = (contact.message && contact.message.trim())
+          ? contact.message
+          : (process.env.DEFAULT_MESSAGE || 'Bonjour ! 👋');
         await client.sendMessage(chatId, message);
         contact.status = 'done'; state.stats.sent++;
         addLog(`✅ Envoyé à +${number}`, 'success');
@@ -191,12 +193,20 @@ app.post('/api/import', upload.single('file'), (req, res) => {
   try {
     const content = fs.readFileSync(req.file.path, 'utf-8');
     const records = csv.parse(content, { columns: true, skip_empty_lines: true });
+    // Message saisi dans le dashboard — obligatoire
+    const message = (req.body.message || '').trim();
+    if (!message) return res.status(400).json({ ok: false, error: 'Message vide' });
     let added = 0;
     for (const row of records) {
       const phone = (row.telephone || row.phone || row['Telephone'] || Object.values(row)[0] || '').replace(/\D/g,'');
       if (!phone || phone.length < 8) continue;
       if (state.queue.find(c => c.phone === phone)) continue;
-      state.queue.push({ phone, status: 'pending', message: req.body.message || process.env.DEFAULT_MESSAGE || 'Bonjour ! 👋', addedAt: new Date().toISOString() });
+      state.queue.push({
+        phone,
+        status: 'pending',
+        message, // stocke le vrai message
+        addedAt: new Date().toISOString()
+      });
       added++;
     }
     saveQueue();

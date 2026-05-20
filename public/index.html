@@ -47,9 +47,10 @@ body { font-family: var(--font); background: var(--bg); color: var(--text); min-
 .btn-row { display: flex; gap: 10px; flex-wrap: wrap; }
 .form-group { display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px; }
 label { font-size: 12px; font-weight: 600; color: var(--muted); }
-input[type=text], input[type=file], textarea { background: var(--surface2); border: 1px solid var(--border); color: var(--text); border-radius: var(--radius-sm); padding: 9px 12px; font-family: var(--font); font-size: 13px; outline: none; transition: border-color .15s; width: 100%; }
-input:focus, textarea:focus { border-color: var(--primary); }
-textarea { resize: vertical; min-height: 80px; }
+textarea { background: var(--surface2); border: 1px solid var(--border); color: var(--text); border-radius: var(--radius-sm); padding: 9px 12px; font-family: var(--font); font-size: 13px; outline: none; transition: border-color .15s; width: 100%; resize: vertical; min-height: 120px; }
+textarea:focus { border-color: var(--primary); }
+.msg-preview { background: color-mix(in oklch, var(--primary) 8%, var(--surface2)); border: 1px solid color-mix(in oklch, var(--primary) 30%, transparent); border-radius: var(--radius-sm); padding: 12px 14px; font-size: 13px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; color: var(--text); margin-top: 8px; }
+.msg-count { font-size: 11px; color: var(--muted); margin-top: 4px; text-align: right; }
 .qr-wrap { display: flex; flex-direction: column; align-items: center; gap: 16px; padding: 24px; }
 .qr-wrap img { border-radius: var(--radius); background: #fff; padding: 12px; width: 240px; height: 240px; }
 .qr-placeholder { width: 240px; height: 240px; background: var(--surface2); border-radius: var(--radius); display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 12px; text-align: center; border: 1px dashed var(--border); padding: 16px; }
@@ -74,7 +75,6 @@ tr:hover td { background: var(--surface2); }
 .dropzone { border: 2px dashed var(--border); border-radius: var(--radius); padding: 32px; text-align: center; color: var(--muted); cursor: pointer; transition: all .15s; }
 .dropzone:hover { border-color: var(--primary); color: var(--primary); }
 .dropzone input { display: none; }
-/* Sidebar QR indicator */
 .nav-qr-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--yellow); margin-left: auto; animation: pulse 1.5s infinite; }
 </style>
 </head>
@@ -107,40 +107,48 @@ tr:hover td { background: var(--surface2); }
           <button class="btn btn-danger" onclick="clearQueue()">&#128465; Vider la queue</button>
         </div>
         <div class="progress"><div class="progress-fill" id="progress-bar" style="width:0%"></div></div>
-        <div style="font-size:11px;color:var(--muted);margin-top:5px" id="progress-label">0 / 0</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:5px" id="progress-label">0 / 0 contacts traites</div>
       </div>
       <div class="card"><div class="card-title">Journal</div><div class="log-wrap" id="log"></div></div>
     </div>
+
     <div class="page" id="page-import">
       <h1 class="page-title">Importer des contacts</h1>
       <div class="card">
-        <div class="card-title">Message</div>
-        <div class="form-group"><label>Message envoye a chaque contact</label><textarea id="import-message" placeholder="Bonjour ! Rejoins notre groupe : https://chat.whatsapp.com/..."></textarea></div>
+        <div class="card-title">Message envoye a chaque contact</div>
+        <div class="form-group">
+          <textarea id="import-message" placeholder="Ecrivez votre message ici..." oninput="updatePreview()"></textarea>
+          <div class="msg-count" id="msg-count">0 caracteres</div>
+        </div>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:6px">&#128065; Apercu WhatsApp :</div>
+        <div class="msg-preview" id="msg-preview" style="color:var(--muted)">Votre message apparaitra ici...</div>
       </div>
       <div class="card">
         <div class="card-title">Fichier CSV</div>
-        <p style="color:var(--muted);font-size:12px;margin-bottom:14px">Colonne requise : telephone (ex: +33612345678)</p>
-        <label class="dropzone" for="csv-file">
+        <p style="color:var(--muted);font-size:12px;margin-bottom:14px">Colonne requise : <strong>telephone</strong> (ex: +33612345678)</p>
+        <label class="dropzone" for="csv-file" id="dropzone-label">
           <input type="file" id="csv-file" accept=".csv" onchange="importCSV()">
-          <div>Glissez votre CSV ou cliquez ici</div>
+          <div id="dropzone-text">&#128196; Glissez votre CSV ou cliquez ici</div>
         </label>
         <div id="import-result" style="margin-top:12px;font-size:13px"></div>
       </div>
     </div>
+
     <div class="page" id="page-groups">
       <div class="page-header"><h1 class="page-title">Groupes WhatsApp</h1><button class="btn btn-ghost" onclick="loadGroups()">Actualiser</button></div>
       <div class="card"><div class="table-wrap"><table><thead><tr><th>Groupe</th><th>Membres</th><th>Export</th></tr></thead><tbody id="groups-table"><tr><td colspan="3" style="color:var(--muted);text-align:center;padding:24px">Cliquez sur Actualiser</td></tr></tbody></table></div></div>
     </div>
+
     <div class="page" id="page-connection">
       <h1 class="page-title">Connexion WhatsApp</h1>
       <div class="grid-2">
         <div class="card">
           <div class="card-title">QR Code</div>
           <div class="qr-wrap" id="qr-wrap">
-            <div class="qr-placeholder" id="qr-placeholder">&#8987; Chargement du QR code...</div>
+            <div class="qr-placeholder">&#8987; Generation du QR code...<br><small style="margin-top:8px;display:block">Patientez ~30 secondes</small></div>
           </div>
         </div>
-        <div class="card"><div class="card-title">Instructions</div><ol style="color:var(--muted);font-size:13px;line-height:2;padding-left:18px"><li>Ouvrez WhatsApp sur votre telephone</li><li>Reglages &#8594; Appareils connectes</li><li>Connecter un appareil</li><li>Scannez le QR code</li><li>Connexion automatique ✅</li></ol></div>
+        <div class="card"><div class="card-title">Instructions</div><ol style="color:var(--muted);font-size:13px;line-height:2;padding-left:18px"><li>Ouvrez WhatsApp sur votre telephone</li><li>Reglages &#8594; Appareils connectes</li><li>Connecter un appareil</li><li>Scannez le QR code</li><li>Connexion automatique &#10003;</li></ol></div>
       </div>
     </div>
   </main>
@@ -156,6 +164,20 @@ function showPage(name, el) {
   if (name === 'groups') loadGroups();
 }
 
+function updatePreview() {
+  const msg = document.getElementById('import-message').value;
+  const preview = document.getElementById('msg-preview');
+  const count = document.getElementById('msg-count');
+  count.textContent = msg.length + ' caracteres';
+  if (msg.trim()) {
+    preview.style.color = 'var(--text)';
+    preview.textContent = msg;
+  } else {
+    preview.style.color = 'var(--muted)';
+    preview.textContent = 'Votre message apparaitra ici...';
+  }
+}
+
 function updateQR(qr, ready) {
   const wrap = document.getElementById('qr-wrap');
   const navBtn = document.getElementById('nav-connexion');
@@ -165,10 +187,9 @@ function updateQR(qr, ready) {
   } else if (qr && qr !== lastQr) {
     lastQr = qr;
     wrap.innerHTML = '<img src="' + qr + '" alt="QR Code WhatsApp"><span class="qr-badge scanning">&#128247; Scannez maintenant</span>';
-    // Alerte visuelle dans la sidebar
     navBtn.innerHTML = '&#128241; Connexion <span class="nav-qr-dot"></span>';
   } else if (!qr && !ready) {
-    wrap.innerHTML = '<div class="qr-placeholder" id="qr-placeholder">&#8987; Generation du QR code...<br><small style="margin-top:8px;display:block">Patientez ~20 secondes</small></div>';
+    wrap.innerHTML = '<div class="qr-placeholder">&#8987; Generation du QR code...<br><small style="margin-top:8px;display:block">Patientez ~30 secondes</small></div>';
   }
 }
 
@@ -199,12 +220,20 @@ async function clearQueue() { if(!confirm('Vider la queue ?')) return; await fet
 function exportCSV() { window.location.href='/api/export'; }
 async function importCSV() {
   const file = document.getElementById('csv-file').files[0];
-  const message = document.getElementById('import-message').value;
+  const message = document.getElementById('import-message').value.trim();
   if (!file) return;
-  const fd = new FormData(); fd.append('file', file); fd.append('message', message);
+  if (!message) {
+    document.getElementById('import-result').innerHTML = '<span class="badge badge-red">&#9888; Ecrivez un message avant d\'importer</span>';
+    return;
+  }
+  document.getElementById('dropzone-text').textContent = '⏳ Import en cours...';
+  const fd = new FormData();
+  fd.append('file', file);
+  fd.append('message', message);
   const r = await fetch('/api/import',{method:'POST',body:fd}).then(r=>r.json());
+  document.getElementById('dropzone-text').textContent = file.name;
   document.getElementById('import-result').innerHTML = r.ok
-    ? '<span class="badge badge-green">' + r.added + ' contacts importes</span>'
+    ? '<span class="badge badge-green">&#10003; ' + r.added + ' contacts importes avec votre message</span>'
     : '<span class="badge badge-red">Erreur : ' + r.error + '</span>';
 }
 async function loadGroups() {
