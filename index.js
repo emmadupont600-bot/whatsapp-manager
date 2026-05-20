@@ -12,26 +12,21 @@ const PORT = process.env.PORT || 3000;
 const DATA_FILE = path.join(__dirname, 'data', 'queue.json');
 const AUTH_PATH = '/app/.wwebjs_auth';
 
-// Supprime récursivement tous les fichiers SingletonLock dans un dossier
 function removeLocks(dir) {
   if (!fs.existsSync(dir)) return;
   try {
     const entries = fs.readdirSync(dir, { withFileTypes: true });
     for (const e of entries) {
       const full = path.join(dir, e.name);
-      if (e.isDirectory()) {
-        removeLocks(full);
-      } else if (['SingletonLock','SingletonCookie','SingletonSocket'].includes(e.name)) {
+      if (e.isDirectory()) removeLocks(full);
+      else if (['SingletonLock','SingletonCookie','SingletonSocket'].includes(e.name)) {
         fs.unlinkSync(full);
         console.log(`[INIT] Supprimé : ${full}`);
       }
     }
-  } catch(e) {
-    console.log('[INIT] removeLocks error:', e.message);
-  }
+  } catch(e) { console.log('[INIT] removeLocks error:', e.message); }
 }
 
-// Nettoyage au démarrage
 removeLocks(AUTH_PATH);
 
 app.use(express.json());
@@ -64,9 +59,12 @@ loadQueue();
 function createClient() {
   return new Client({
     authStrategy: new LocalAuth({ dataPath: AUTH_PATH }),
+    webVersionCache: { type: 'none' },
     puppeteer: {
       headless: true,
       executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium',
+      timeout: 120000,
+      protocolTimeout: 120000,
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
@@ -81,46 +79,62 @@ function createClient() {
         '--mute-audio',
         '--no-default-browser-check',
         '--safebrowsing-disable-auto-update',
+        '--disable-features=TranslateUI',
+        '--disable-ipc-flooding-protection',
+        '--memory-pressure-off',
       ]
     }
   });
 }
 
 let client = createClient();
+let retryCount = 0;
+const MAX_RETRIES = 10;
 
 function bindClientEvents(c) {
   c.on('qr', async (qr) => {
+    retryCount = 0;
     state.qr = await qrcode.toDataURL(qr);
     state.ready = false;
     addLog('QR Code généré — scannez-le sur le dashboard', 'warn');
   });
   c.on('ready', () => {
+    retryCount = 0;
     state.ready = true; state.qr = null;
     addLog('WhatsApp connecté et prêt ✅', 'success');
   });
   c.on('disconnected', (reason) => {
     state.ready = false; state.running = false;
     addLog(`WhatsApp déconnecté : ${reason}`, 'error');
-    setTimeout(() => {
-      removeLocks(AUTH_PATH);
-      client = createClient();
-      bindClientEvents(client);
-      client.initialize().catch(err => addLog(`Reconnexion échouée : ${err.message}`, 'error'));
-    }, 8000);
+    scheduleRetry(8000);
   });
   c.on('auth_failure', (msg) => addLog(`Erreur auth : ${msg}`, 'error'));
+}
+
+function scheduleRetry(delay) {
+  if (retryCount >= MAX_RETRIES) {
+    addLog(`❌ Trop de tentatives (${MAX_RETRIES}), arrêt.`, 'error');
+    return;
+  }
+  retryCount++;
+  const wait = delay || Math.min(10000 * retryCount, 60000);
+  addLog(`🔄 Nouvelle tentative dans ${wait/1000}s (${retryCount}/${MAX_RETRIES})`, 'warn');
+  setTimeout(() => {
+    removeLocks(AUTH_PATH);
+    client = createClient();
+    bindClientEvents(client);
+    client.initialize().catch(err => {
+      addLog(`Retry ${retryCount} échoué : ${err.message}`, 'error');
+      scheduleRetry();
+    });
+  }, wait);
 }
 
 bindClientEvents(client);
 client.initialize().catch(err => {
   addLog(`Erreur initialisation : ${err.message}`, 'error');
   console.error(err);
-  setTimeout(() => {
-    removeLocks(AUTH_PATH);
-    client = createClient();
-    bindClientEvents(client);
-    client.initialize().catch(e => addLog(`Retry échoué : ${e.message}`, 'error'));
-  }, 10000);
+  scheduleRetry(15000);
 });
 
 const MIN_DELAY_S = parseInt(process.env.MIN_DELAY_S || '45');
@@ -225,7 +239,6 @@ app.post('/api/clear', (req, res) => {
   res.json({ ok: true });
 });
 
-// Endpoint debug : force suppression des locks
 app.post('/api/fix-locks', (req, res) => {
   removeLocks(AUTH_PATH);
   res.json({ ok: true, msg: 'Locks supprimés' });
