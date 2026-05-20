@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="fr" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WhatsApp Manager</title>
+<link href="https://api.fontshare.com/v2/css?f[]=satoshi@400,500,700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #0f0f0f; --surface: #1a1a1a; --surface2: #222; --border: #2e2e2e;
+  --text: #e8e8e8; --muted: #888; --faint: #444;
+  --green: #22c55e; --red: #ef4444; --yellow: #f59e0b;
+  --primary: #25d366; --primary-hover: #1db954;
+  --radius: 10px; --radius-sm: 6px;
+  --font: 'Satoshi', sans-serif;
+}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: var(--font); background: var(--bg); color: var(--text); min-height: 100vh; font-size: 14px; }
+.app { display: grid; grid-template-columns: 240px 1fr; min-height: 100vh; }
+.sidebar { background: var(--surface); border-right: 1px solid var(--border); padding: 24px 16px; display: flex; flex-direction: column; gap: 8px; }
+.logo { display: flex; align-items: center; gap: 10px; padding: 0 8px 20px; border-bottom: 1px solid var(--border); margin-bottom: 8px; }
+.logo svg { color: var(--primary); }
+.logo span { font-size: 16px; font-weight: 700; }
+.nav-item { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: var(--radius-sm); cursor: pointer; color: var(--muted); transition: all .15s; font-weight: 500; border: none; background: none; width: 100%; text-align: left; font-family: var(--font); font-size: 14px; }
+.nav-item:hover { background: var(--surface2); color: var(--text); }
+.nav-item.active { background: color-mix(in oklch, var(--primary) 12%, var(--surface)); color: var(--primary); }
+.main { padding: 32px; overflow-y: auto; }
+.page { display: none; flex-direction: column; gap: 24px; }
+.page.active { display: flex; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; }
+.card-title { font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; margin-bottom: 12px; }
+.grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+.grid-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }
+.stat-val { font-size: 32px; font-weight: 700; line-height: 1; }
+.stat-label { font-size: 12px; color: var(--muted); margin-top: 4px; }
+.green { color: var(--green); } .red { color: var(--red); } .yellow { color: var(--yellow); }
+.badge { display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 99px; font-size: 11px; font-weight: 600; }
+.badge-green { background: color-mix(in oklch, var(--green) 15%, transparent); color: var(--green); }
+.badge-red { background: color-mix(in oklch, var(--red) 15%, transparent); color: var(--red); }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.btn { display: inline-flex; align-items: center; gap: 6px; padding: 9px 18px; border-radius: var(--radius-sm); border: none; font-family: var(--font); font-size: 13px; font-weight: 600; cursor: pointer; transition: all .15s; }
+.btn-primary { background: var(--primary); color: #000; }
+.btn-primary:hover { background: var(--primary-hover); }
+.btn-ghost { background: var(--surface2); color: var(--text); border: 1px solid var(--border); }
+.btn-ghost:hover { background: var(--faint); }
+.btn-danger { background: color-mix(in oklch, var(--red) 15%, transparent); color: var(--red); border: 1px solid color-mix(in oklch, var(--red) 25%, transparent); }
+.btn-row { display: flex; gap: 10px; flex-wrap: wrap; }
+.form-group { display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px; }
+label { font-size: 12px; font-weight: 600; color: var(--muted); }
+input[type=text], input[type=file], textarea { background: var(--surface2); border: 1px solid var(--border); color: var(--text); border-radius: var(--radius-sm); padding: 9px 12px; font-family: var(--font); font-size: 13px; outline: none; transition: border-color .15s; width: 100%; }
+input:focus, textarea:focus { border-color: var(--primary); }
+textarea { resize: vertical; min-height: 80px; }
+.qr-wrap { display: flex; flex-direction: column; align-items: center; gap: 16px; padding: 24px; }
+.qr-wrap img { border-radius: var(--radius); background: #fff; padding: 12px; width: 200px; height: 200px; }
+.qr-placeholder { width: 200px; height: 200px; background: var(--surface2); border-radius: var(--radius); display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 12px; text-align: center; border: 1px dashed var(--border); padding: 16px; }
+.log-wrap { background: #0a0a0a; border-radius: var(--radius-sm); padding: 14px; height: 280px; overflow-y: auto; font-size: 12px; font-family: 'SF Mono', monospace; display: flex; flex-direction: column; gap: 3px; }
+.log-item { display: flex; gap: 8px; }
+.log-time { color: var(--faint); flex-shrink: 0; }
+.log-info { color: #aaa; } .log-success { color: var(--green); } .log-warn { color: var(--yellow); } .log-error { color: var(--red); }
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th { text-align: left; font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+td { padding: 11px 12px; border-bottom: 1px solid var(--border); }
+tr:last-child td { border-bottom: none; }
+tr:hover td { background: var(--surface2); }
+.progress { height: 6px; background: var(--surface2); border-radius: 99px; overflow: hidden; margin-top: 8px; }
+.progress-fill { height: 100%; background: var(--primary); border-radius: 99px; transition: width .4s; }
+.page-header { display: flex; align-items: center; justify-content: space-between; }
+.page-title { font-size: 20px; font-weight: 700; }
+.dropzone { border: 2px dashed var(--border); border-radius: var(--radius); padding: 32px; text-align: center; color: var(--muted); cursor: pointer; transition: all .15s; }
+.dropzone:hover { border-color: var(--primary); color: var(--primary); }
+.dropzone input { display: none; }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="logo">
+      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>
+      <span>WA Manager</span>
+    </div>
+    <button class="nav-item active" onclick="showPage('dashboard',this)">&#128202; Dashboard</button>
+    <button class="nav-item" onclick="showPage('import',this)">&#128229; Importer CSV</button>
+    <button class="nav-item" onclick="showPage('groups',this)">&#128101; Groupes</button>
+    <button class="nav-item" onclick="showPage('connection',this)">&#128241; Connexion</button>
+  </aside>
+  <main class="main">
+    <div class="page active" id="page-dashboard">
+      <div class="page-header"><h1 class="page-title">Dashboard</h1><div id="status-badge"></div></div>
+      <div class="grid-3">
+        <div class="card"><div class="card-title">Envoyes</div><div class="stat-val green" id="stat-sent">0</div><div class="stat-label">messages envoyes</div></div>
+        <div class="card"><div class="card-title">En attente</div><div class="stat-val yellow" id="stat-pending">0</div><div class="stat-label">dans la queue</div></div>
+        <div class="card"><div class="card-title">Echecs</div><div class="stat-val red" id="stat-failed">0</div><div class="stat-label">erreurs / ignores</div></div>
+      </div>
+      <div class="card">
+        <div class="card-title">Controle du bot</div>
+        <div class="btn-row" style="margin-bottom:14px">
+          <button class="btn btn-primary" onclick="startBot()">&#9654; Demarrer</button>
+          <button class="btn btn-ghost" onclick="pauseBot()" id="btn-pause">&#9208; Pause</button>
+          <button class="btn btn-ghost" onclick="exportCSV()">&#11015; Exporter CSV</button>
+          <button class="btn btn-danger" onclick="clearQueue()">&#128465; Vider la queue</button>
+        </div>
+        <div class="progress"><div class="progress-fill" id="progress-bar" style="width:0%"></div></div>
+        <div style="font-size:11px;color:var(--muted);margin-top:5px" id="progress-label">0 / 0</div>
+      </div>
+      <div class="card"><div class="card-title">Journal</div><div class="log-wrap" id="log"></div></div>
+    </div>
+    <div class="page" id="page-import">
+      <h1 class="page-title">Importer des contacts</h1>
+      <div class="card">
+        <div class="card-title">Message</div>
+        <div class="form-group"><label>Message envoye a chaque contact</label><textarea id="import-message" placeholder="Bonjour ! Rejoins notre groupe : https://chat.whatsapp.com/..."></textarea></div>
+      </div>
+      <div class="card">
+        <div class="card-title">Fichier CSV</div>
+        <p style="color:var(--muted);font-size:12px;margin-bottom:14px">Colonne requise : telephone (ex: +33612345678)</p>
+        <label class="dropzone" for="csv-file">
+          <input type="file" id="csv-file" accept=".csv" onchange="importCSV()">
+          <div>Glissez votre CSV ou cliquez ici</div>
+        </label>
+        <div id="import-result" style="margin-top:12px;font-size:13px"></div>
+      </div>
+    </div>
+    <div class="page" id="page-groups">
+      <div class="page-header"><h1 class="page-title">Groupes WhatsApp</h1><button class="btn btn-ghost" onclick="loadGroups()">Actualiser</button></div>
+      <div class="card"><div class="table-wrap"><table><thead><tr><th>Groupe</th><th>Membres</th><th>Export</th></tr></thead><tbody id="groups-table"><tr><td colspan="3" style="color:var(--muted);text-align:center;padding:24px">Cliquez sur Actualiser</td></tr></tbody></table></div></div>
+    </div>
+    <div class="page" id="page-connection">
+      <h1 class="page-title">Connexion WhatsApp</h1>
+      <div class="grid-2">
+        <div class="card"><div class="card-title">QR Code</div><div class="qr-wrap" id="qr-wrap"><div class="qr-placeholder">En attente du QR code...</div></div></div>
+        <div class="card"><div class="card-title">Instructions</div><ol style="color:var(--muted);font-size:13px;line-height:2;padding-left:18px"><li>Ouvrez WhatsApp sur votre telephone</li><li>Reglages -> Appareils connectes</li><li>Connecter un appareil</li><li>Scannez le QR code</li><li>Connexion automatique</li></ol></div>
+      </div>
+    </div>
+  </main>
+</div>
+<script>
+function showPage(name, el) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  document.getElementById('page-' + name).classList.add('active');
+  el.classList.add('active');
+  if (name === 'groups') loadGroups();
+}
+async function fetchStatus() {
+  try {
+    const r = await fetch('/api/status').then(r => r.json());
+    document.getElementById('status-badge').innerHTML = r.ready
+      ? '<span class="badge badge-green"><span class="dot"></span>Connecte</span>'
+      : '<span class="badge badge-red"><span class="dot"></span>Deconnecte</span>';
+    document.getElementById('stat-sent').textContent = r.stats.sent;
+    document.getElementById('stat-pending').textContent = r.pending;
+    document.getElementById('stat-failed').textContent = r.stats.failed + r.stats.skipped;
+    const done = r.total - r.pending;
+    const pct = r.total > 0 ? Math.round(done / r.total * 100) : 0;
+    document.getElementById('progress-bar').style.width = pct + '%';
+    document.getElementById('progress-label').textContent = done + ' / ' + r.total + ' contacts traites';
+    document.getElementById('btn-pause').textContent = r.paused ? 'Reprendre' : 'Pause';
+    const qrWrap = document.getElementById('qr-wrap');
+    if (r.qr) qrWrap.innerHTML = '<img src="' + r.qr + '" alt="QR"><p style="font-size:12px;color:var(--muted)">Scannez avec WhatsApp</p>';
+    else if (r.ready) qrWrap.innerHTML = '<div class="qr-placeholder" style="color:var(--green)">Connecte !</div>';
+    document.getElementById('log').innerHTML = r.log.map(l => {
+      const t = new Date(l.time).toLocaleTimeString('fr-FR');
+      return '<div class="log-item"><span class="log-time">' + t + '</span><span class="log-' + l.type + '">' + l.msg + '</span></div>';
+    }).join('');
+  } catch(e) {}
+}
+async function startBot() { const r = await fetch('/api/start',{method:'POST'}).then(r=>r.json()); if(!r.ok) alert('Erreur : '+r.error); }
+async function pauseBot() { await fetch('/api/pause',{method:'POST'}); }
+async function clearQueue() { if(!confirm('Vider la queue ?')) return; await fetch('/api/clear',{method:'POST'}); }
+function exportCSV() { window.location.href='/api/export'; }
+async function importCSV() {
+  const file = document.getElementById('csv-file').files[0];
+  const message = document.getElementById('import-message').value;
+  if (!file) return;
+  const fd = new FormData(); fd.append('file', file); fd.append('message', message);
+  const r = await fetch('/api/import',{method:'POST',body:fd}).then(r=>r.json());
+  document.getElementById('import-result').innerHTML = r.ok
+    ? '<span class="badge badge-green">' + r.added + ' contacts importes</span>'
+    : '<span class="badge badge-red">Erreur : ' + r.error + '</span>';
+}
+async function loadGroups() {
+  const groups = await fetch('/api/groups').then(r=>r.json());
+  const tbody = document.getElementById('groups-table');
+  if (!groups.length) { tbody.innerHTML='<tr><td colspan="3" style="color:var(--muted);text-align:center;padding:24px">Aucun groupe (WhatsApp connecte ?)</td></tr>'; return; }
+  tbody.innerHTML = groups.map(g => '<tr><td><strong>' + g.name + '</strong></td><td>' + g.count + '</td><td><a href="/api/export-group/' + encodeURIComponent(g.name) + '" class="btn btn-ghost" style="padding:5px 12px;font-size:12px">Exporter CSV</a></td></tr>').join('');
+}
+fetchStatus();
+setInterval(fetchStatus, 2000);
+</script>
+</body>
+</html>
