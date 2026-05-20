@@ -14,21 +14,22 @@ app.use(express.static(path.join(__dirname, 'public')));
 const upload = multer({ dest: 'uploads/' });
 
 // ─── Paramètres anti-détection ───────────────────────────────────────────────
-const MIN_DELAY_S       = parseInt(process.env.MIN_DELAY_S       || '90');
-const MAX_DELAY_S       = parseInt(process.env.MAX_DELAY_S       || '180');
-const SESSION_SIZE      = parseInt(process.env.SESSION_SIZE      || '15');
-const SESSION_PAUSE_MIN = parseInt(process.env.SESSION_PAUSE_MIN || '600');
-const SESSION_PAUSE_MAX = parseInt(process.env.SESSION_PAUSE_MAX || '1200');
-const TYPING_MIN_MS     = parseInt(process.env.TYPING_MIN_MS     || '2000');
-const TYPING_MAX_MS     = parseInt(process.env.TYPING_MAX_MS     || '6000');
-// Délai entre le texte et le lien (ms) — assez long pour que WA traite le 1er msg
-const LINK_SPLIT_DELAY  = parseInt(process.env.LINK_SPLIT_DELAY  || '4000');
+const MIN_DELAY_S        = parseInt(process.env.MIN_DELAY_S        || '90');
+const MAX_DELAY_S        = parseInt(process.env.MAX_DELAY_S        || '180');
+const SESSION_SIZE       = parseInt(process.env.SESSION_SIZE       || '15');
+const SESSION_PAUSE_MIN  = parseInt(process.env.SESSION_PAUSE_MIN  || '600');
+const SESSION_PAUSE_MAX  = parseInt(process.env.SESSION_PAUSE_MAX  || '1200');
+const TYPING_MIN_MS      = parseInt(process.env.TYPING_MIN_MS      || '2000');
+const TYPING_MAX_MS      = parseInt(process.env.TYPING_MAX_MS      || '6000');
+// Délai ALÉATOIRE entre le texte et le lien — réduit les patterns détectables
+const LINK_DELAY_MIN_MS  = parseInt(process.env.LINK_DELAY_MIN_MS  || '8000');
+const LINK_DELAY_MAX_MS  = parseInt(process.env.LINK_DELAY_MAX_MS  || '15000');
 
 // ─── Utilitaires ─────────────────────────────────────────────────────────────
 const rand  = (a, b) => a + Math.random() * (b - a);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-// Détecte une URL dans un texte et retourne { text, url } ou null si pas d'URL
+// Détecte la première URL dans un texte
 const URL_RE = /(https?:\/\/[^\s]+)/i;
 function splitMessageAndLink(msg) {
   const match = msg.match(URL_RE);
@@ -54,7 +55,7 @@ function removeLocks(dir) {
   } catch(e) { console.log('[INIT] removeLocks error:', e.message); }
 }
 
-// ─── Classe BotAccount : un compte WhatsApp indépendant ──────────────────────
+// ─── Classe BotAccount ───────────────────────────────────────────────────────
 class BotAccount {
   constructor(id) {
     this.id         = id;
@@ -72,7 +73,6 @@ class BotAccount {
     this._initClient();
   }
 
-  // ── Persistance ──────────────────────────────────────────────────────────
   _loadQueue() {
     if (fs.existsSync(this.dataFile)) {
       try {
@@ -90,14 +90,11 @@ class BotAccount {
     const dir = path.dirname(this.dataFile);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(this.dataFile, JSON.stringify({
-      queue:        this.state.queue,
-      stats:        this.state.stats,
-      sessionCount: this.state.sessionCount,
-      savedAt:      new Date().toISOString()
+      queue: this.state.queue, stats: this.state.stats,
+      sessionCount: this.state.sessionCount, savedAt: new Date().toISOString()
     }, null, 2));
   }
 
-  // ── Logging ──────────────────────────────────────────────────────────────
   log(msg, type = 'info') {
     const entry = { time: new Date().toISOString(), msg, type };
     this.state.log.unshift(entry);
@@ -105,19 +102,12 @@ class BotAccount {
     console.log(`[BOT${this.id}][${type.toUpperCase()}] ${msg}`);
   }
 
-  // ── Reprise automatique après crash ──────────────────────────────────────
   _autoResume() {
     let fixed = 0;
-    this.state.queue.forEach(c => {
-      if (c.status === 'processing') { c.status = 'pending'; fixed++; }
-    });
-    if (fixed > 0) {
-      this.log(`♻️ ${fixed} contacts remis en attente après crash`, 'warn');
-      this._saveQueue();
-    }
+    this.state.queue.forEach(c => { if (c.status === 'processing') { c.status = 'pending'; fixed++; } });
+    if (fixed > 0) { this.log(`♻️ ${fixed} contacts remis en attente après crash`, 'warn'); this._saveQueue(); }
   }
 
-  // ── Client WhatsApp ──────────────────────────────────────────────────────
   _makeClient() {
     return new Client({
       authStrategy: new LocalAuth({ dataPath: this.authPath }),
@@ -126,14 +116,11 @@ class BotAccount {
         headless: true,
         executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium',
         timeout: 120000, protocolTimeout: 120000,
-        args: [
-          '--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage',
+        args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage',
           '--disable-gpu','--no-first-run','--no-zygote','--single-process',
           '--disable-extensions','--disable-background-networking',
           '--disable-sync','--mute-audio','--no-default-browser-check',
-          '--safebrowsing-disable-auto-update','--disable-features=TranslateUI',
-          '--memory-pressure-off',
-        ]
+          '--safebrowsing-disable-auto-update','--disable-features=TranslateUI','--memory-pressure-off']
       }
     });
   }
@@ -173,10 +160,7 @@ class BotAccount {
       removeLocks(this.authPath);
       this.client = this._makeClient();
       this._bindEvents(this.client);
-      this.client.initialize().catch(err => {
-        this.log(`Retry ${this.retryCount} échoué : ${err.message}`, 'error');
-        this._scheduleRetry();
-      });
+      this.client.initialize().catch(err => { this.log(`Retry ${this.retryCount} échoué : ${err.message}`, 'error'); this._scheduleRetry(); });
     }, wait);
   }
 
@@ -184,13 +168,9 @@ class BotAccount {
     removeLocks(this.authPath);
     this.client = this._makeClient();
     this._bindEvents(this.client);
-    this.client.initialize().catch(err => {
-      this.log(`Erreur initialisation : ${err.message}`, 'error');
-      this._scheduleRetry(15000);
-    });
+    this.client.initialize().catch(err => { this.log(`Erreur initialisation : ${err.message}`, 'error'); this._scheduleRetry(15000); });
   }
 
-  // ── Timing anti-détection ────────────────────────────────────────────────
   async _delayMsg() {
     const ms = rand(MIN_DELAY_S, MAX_DELAY_S) * 1000;
     this.log(`⏳ Pause : ${(ms/1000).toFixed(0)}s`, 'info');
@@ -202,45 +182,48 @@ class BotAccount {
     await sleep(ms);
   }
   async _typing(chat) {
-    try {
-      await chat.sendStateTyping();
-      await sleep(rand(TYPING_MIN_MS, TYPING_MAX_MS));
-      await chat.clearState();
-    } catch(e) {}
+    try { await chat.sendStateTyping(); await sleep(rand(TYPING_MIN_MS, TYPING_MAX_MS)); await chat.clearState(); } catch(e) {}
   }
 
-  // ── Envoi d'un message (avec séparation lien si nécessaire) ──────────────
-  // Stratégie :
-  //   1. Si le message contient une URL → on envoie le texte d'abord,
-  //      on attend LINK_SPLIT_DELAY ms, puis on envoie le lien seul.
-  //      WhatsApp génère alors un aperçu cliquable sur le 2ème message.
-  //   2. Si pas d'URL → envoi normal en un seul message.
-  async _sendMessage(chatId, rawMsg) {
-    const parts = splitMessageAndLink(rawMsg);
-    if (parts && parts.text) {
-      // Texte + lien séparés
-      await this._typing(await this.client.getChatById(chatId));
-      await this.client.sendMessage(chatId, parts.text);
-      await sleep(LINK_SPLIT_DELAY + rand(500, 1500));
-      await this.client.sendMessage(chatId, parts.url);
-      this.log(`🔗 Lien envoyé séparément (${LINK_SPLIT_DELAY}ms après le texte)`, 'info');
-    } else if (parts && !parts.text) {
-      // Message = lien seul, pas besoin de séparer
-      await this._typing(await this.client.getChatById(chatId));
-      await this.client.sendMessage(chatId, parts.url);
-    } else {
-      // Pas d'URL dans le message
-      const chat = await this.client.getChatById(chatId);
+  // ── Envoi intelligent : texte d'abord, lien séparé avec délai aléatoire ──
+  // Le lien peut venir de :
+  //   1. contact.link (champ dédié du CSV) — prioritaire
+  //   2. Une URL détectée dans le corps du message
+  // Dans les deux cas : texte envoyé → délai 8-15s aléatoire → lien seul
+  // Résultat : WhatsApp génère un aperçu cliquable même pour les non-contacts
+  async _sendMessage(chatId, rawMsg, link) {
+    const chat = await this.client.getChatById(chatId);
+
+    if (link && link.trim()) {
+      // Cas 1 : lien dans champ séparé
       await this._typing(chat);
-      await this.client.sendMessage(chatId, rawMsg);
+      await this.client.sendMessage(chatId, rawMsg.trim());
+      const delay = rand(LINK_DELAY_MIN_MS, LINK_DELAY_MAX_MS);
+      this.log(`⏱ Délai avant lien : ${(delay/1000).toFixed(1)}s`, 'info');
+      await sleep(delay);
+      await this.client.sendMessage(chatId, link.trim());
+    } else {
+      const parts = splitMessageAndLink(rawMsg);
+      if (parts && parts.text) {
+        // Cas 2 : URL dans le message — on sépare
+        await this._typing(chat);
+        await this.client.sendMessage(chatId, parts.text);
+        const delay = rand(LINK_DELAY_MIN_MS, LINK_DELAY_MAX_MS);
+        this.log(`⏱ Délai avant lien : ${(delay/1000).toFixed(1)}s`, 'info');
+        await sleep(delay);
+        await this.client.sendMessage(chatId, parts.url);
+      } else {
+        // Cas 3 : pas de lien, envoi normal
+        await this._typing(chat);
+        await this.client.sendMessage(chatId, rawMsg);
+      }
     }
   }
 
-  // ── Boucle d'envoi ───────────────────────────────────────────────────────
   async runQueue() {
     if (this.state.running) return;
     this.state.running = true;
-    this.log(`🚀 Bot démarré (session ≤${SESSION_SIZE} msgs, pause ${SESSION_PAUSE_MIN/60}-${SESSION_PAUSE_MAX/60}min)`, 'success');
+    this.log(`🚀 Bot démarré (session ≤${SESSION_SIZE} msgs)`, 'success');
 
     while (this.state.queue.some(c => c.status === 'pending')) {
       if (!this.state.ready) { await sleep(10000); continue; }
@@ -263,24 +246,20 @@ class BotAccount {
         if (!exists) {
           contact.status = 'skipped'; this.state.stats.skipped++;
           this.log(`⏭️ Non inscrit : +${number}`, 'warn');
-          this._saveQueue();
-          await sleep(rand(3000, 8000));
-          continue;
+          this._saveQueue(); await sleep(rand(3000, 8000)); continue;
         }
         await sleep(rand(500, 2000));
-        const msg = (contact.message || '').trim() || process.env.DEFAULT_MESSAGE || 'Bonjour ! 👋';
-        await this._sendMessage(chatId, msg);
-        contact.status = 'done';
-        this.state.stats.sent++;
-        this.state.sessionCount++;
-        this.log(`✅ Envoyé à +${number} (${this.state.sessionCount % SESSION_SIZE || SESSION_SIZE}/${SESSION_SIZE})`, 'success');
+        const msg  = (contact.message || '').trim() || process.env.DEFAULT_MESSAGE || 'Bonjour ! 👋';
+        const link = (contact.link    || '').trim();
+        await this._sendMessage(chatId, msg, link);
+        contact.status = 'done'; this.state.stats.sent++; this.state.sessionCount++;
+        this.log(`✅ Envoyé à +${number}${link ? ' 🔗' : ''}`, 'success');
         this._saveQueue();
         await this._delayMsg();
       } catch(err) {
         contact.status = 'failed'; this.state.stats.failed++;
         this.log(`❌ Erreur ${contact.phone} : ${err.message}`, 'error');
-        this._saveQueue();
-        await sleep(rand(30000, 60000));
+        this._saveQueue(); await sleep(rand(30000, 60000));
       }
     }
     this.state.running = false;
@@ -288,15 +267,21 @@ class BotAccount {
     this._saveQueue();
   }
 
-  // ── Import CSV ───────────────────────────────────────────────────────────
-  importCSV(content, message) {
+  // Import CSV — colonnes : telephone, message (opt.), link (opt.)
+  importCSV(content, defaultMessage, defaultLink) {
     const records = csv.parse(content, { columns: true, skip_empty_lines: true });
     let added = 0;
     for (const row of records) {
       const phone = (row.telephone || row.phone || row['Telephone'] || Object.values(row)[0] || '').replace(/\D/g,'');
       if (!phone || phone.length < 8) continue;
       if (this.state.queue.find(c => c.phone === phone)) continue;
-      this.state.queue.push({ phone, status: 'pending', message, addedAt: new Date().toISOString() });
+      this.state.queue.push({
+        phone,
+        status:  'pending',
+        message: row.message || defaultMessage,
+        link:    row.link    || defaultLink || '',
+        addedAt: new Date().toISOString()
+      });
       added++;
     }
     this._saveQueue();
@@ -304,85 +289,58 @@ class BotAccount {
     return added;
   }
 
-  // ── Status JSON ──────────────────────────────────────────────────────────
   getStatus() {
     return {
-      id:           this.id,
-      ready:        this.state.ready,
-      qr:           this.state.qr,
-      running:      this.state.running,
-      paused:       this.state.paused,
-      stats:        this.state.stats,
-      pending:      this.state.queue.filter(c => c.status === 'pending').length,
-      total:        this.state.queue.length,
+      id: this.id, ready: this.state.ready, qr: this.state.qr,
+      running: this.state.running, paused: this.state.paused,
+      stats: this.state.stats,
+      pending: this.state.queue.filter(c => c.status === 'pending').length,
+      total: this.state.queue.length,
       sessionCount: this.state.sessionCount,
-      minDelay:     MIN_DELAY_S,
-      maxDelay:     MAX_DELAY_S,
-      sessionSize:  SESSION_SIZE,
-      log:          this.state.log.slice(0, 50)
+      minDelay: MIN_DELAY_S, maxDelay: MAX_DELAY_S, sessionSize: SESSION_SIZE,
+      linkDelayMin: LINK_DELAY_MIN_MS, linkDelayMax: LINK_DELAY_MAX_MS,
+      log: this.state.log.slice(0, 50)
     };
   }
 
   reset() {
     this.state.queue.forEach(c => { if (c.status !== 'done') c.status = 'pending'; });
-    this.state.stats = { sent: 0, failed: 0, skipped: 0 };
-    this.state.sessionCount = 0;
-    this._saveQueue();
-    this.log('🔄 Queue réinitialisée', 'warn');
+    this.state.stats = { sent: 0, failed: 0, skipped: 0 }; this.state.sessionCount = 0;
+    this._saveQueue(); this.log('🔄 Queue réinitialisée', 'warn');
   }
 
   clear() {
-    this.state.queue = []; this.state.stats = { sent: 0, failed: 0, skipped: 0 };
-    this.state.sessionCount = 0;
-    this._saveQueue();
-    this.log('🗑️ Queue vidée', 'warn');
+    this.state.queue = []; this.state.stats = { sent: 0, failed: 0, skipped: 0 }; this.state.sessionCount = 0;
+    this._saveQueue(); this.log('🗑️ Queue vidée', 'warn');
   }
 }
 
-// ─── Instanciation des deux comptes ──────────────────────────────────────────
+// ─── Deux comptes ─────────────────────────────────────────────────────────────
 const bots = { 1: new BotAccount(1), 2: new BotAccount(2) };
+function getBot(req) { const id = parseInt(req.params.account || req.query.account || '1'); return bots[id] || bots[1]; }
 
-function getBot(req) {
-  const id = parseInt(req.params.account || req.query.account || '1');
-  return bots[id] || bots[1];
-}
-
-// ─── Routes API ──────────────────────────────────────────────────────────────
-app.get('/api/:account/status', (req, res) => res.json(getBot(req).getStatus()));
-
-app.post('/api/:account/start', (req, res) => {
-  const bot = getBot(req);
-  if (!bot.state.ready) return res.status(400).json({ ok: false, error: 'WhatsApp non connecté' });
-  bot.state.paused = false;
-  bot.runQueue();
-  res.json({ ok: true });
-});
-
-app.post('/api/:account/pause', (req, res) => {
-  const bot = getBot(req);
-  bot.state.paused = !bot.state.paused;
-  bot.log(bot.state.paused ? '⏸️ Pause' : '▶️ Reprise', 'warn');
-  res.json({ ok: true, paused: bot.state.paused });
-});
-
-app.post('/api/:account/clear', (req, res) => { getBot(req).clear(); res.json({ ok: true }); });
-app.post('/api/:account/reset', (req, res) => { getBot(req).reset(); res.json({ ok: true }); });
+// ─── Routes API ───────────────────────────────────────────────────────────────
+app.get('/api/:account/status',  (req, res) => res.json(getBot(req).getStatus()));
+app.post('/api/:account/start',  (req, res) => { const b=getBot(req); if(!b.state.ready) return res.status(400).json({ok:false,error:'Non connecté'}); b.state.paused=false; b.runQueue(); res.json({ok:true}); });
+app.post('/api/:account/pause',  (req, res) => { const b=getBot(req); b.state.paused=!b.state.paused; b.log(b.state.paused?'⏸️ Pause':'▶️ Reprise','warn'); res.json({ok:true,paused:b.state.paused}); });
+app.post('/api/:account/clear',  (req, res) => { getBot(req).clear(); res.json({ok:true}); });
+app.post('/api/:account/reset',  (req, res) => { getBot(req).reset(); res.json({ok:true}); });
 
 app.get('/api/:account/export', (req, res) => {
   const bot = getBot(req);
-  const rows = bot.state.queue.map(c => ({ telephone: c.phone, statut: c.status, ajoute_le: c.addedAt }));
-  const out  = stringify(rows, { header: true });
-  res.setHeader('Content-Type', 'text/csv');
-  res.setHeader('Content-Disposition', `attachment; filename="export_bot${bot.id}.csv"`);
-  res.send(out);
+  const rows = bot.state.queue.map(c => ({ telephone: c.phone, statut: c.status, message: c.message, link: c.link||'', ajoute_le: c.addedAt }));
+  res.setHeader('Content-Type','text/csv');
+  res.setHeader('Content-Disposition',`attachment; filename="export_bot${bot.id}.csv"`);
+  res.send(stringify(rows, { header: true }));
 });
 
 app.post('/api/:account/import', upload.single('file'), (req, res) => {
   try {
     const content = fs.readFileSync(req.file.path, 'utf-8');
     const message = (req.body.message || '').trim();
+    const link    = (req.body.link    || '').trim();
     if (!message) return res.status(400).json({ ok: false, error: 'Message vide' });
-    const added = getBot(req).importCSV(content, message);
+    const added = getBot(req).importCSV(content, message, link);
     fs.unlinkSync(req.file.path);
     res.json({ ok: true, added });
   } catch(e) { res.status(400).json({ ok: false, error: e.message }); }
@@ -392,7 +350,7 @@ app.get('/api/:account/groups', async (req, res) => {
   const bot = getBot(req);
   if (!bot.state.ready) return res.json([]);
   const chats = await bot.client.getChats();
-  res.json(chats.filter(c => c.isGroup).map(c => ({ name: c.name, count: c.participants?.length || 0 })));
+  res.json(chats.filter(c => c.isGroup).map(c => ({ name: c.name, count: c.participants?.length||0 })));
 });
 
 app.get('/api/:account/export-group/:name', async (req, res) => {
@@ -401,18 +359,17 @@ app.get('/api/:account/export-group/:name', async (req, res) => {
   const chats = await bot.client.getChats();
   const group = chats.find(c => c.isGroup && c.name === req.params.name);
   if (!group) return res.status(404).json({ ok: false, error: 'Groupe introuvable' });
-  const rows = group.participants.map(p => ({ telephone: `+${p.id.user}`, admin: p.isAdmin ? 'Oui' : 'Non' }));
-  const out  = stringify(rows, { header: true });
-  res.setHeader('Content-Type', 'text/csv');
-  res.setHeader('Content-Disposition', `attachment; filename="${group.name}.csv"`);
-  res.send(out);
+  const rows = group.participants.map(p => ({ telephone: `+${p.id.user}`, admin: p.isAdmin?'Oui':'Non' }));
+  res.setHeader('Content-Type','text/csv');
+  res.setHeader('Content-Disposition',`attachment; filename="${group.name}.csv"`);
+  res.send(stringify(rows, { header: true }));
 });
 
-// Compat routes sans préfixe account (bot 1 par défaut)
-app.get('/api/status',  (req, res) => res.json(bots[1].getStatus()));
-app.post('/api/start',  (req, res) => { bots[1].state.paused=false; bots[1].runQueue(); res.json({ok:true}); });
-app.post('/api/pause',  (req, res) => { bots[1].state.paused=!bots[1].state.paused; res.json({ok:true}); });
-app.post('/api/clear',  (req, res) => { bots[1].clear(); res.json({ok:true}); });
-app.get('/api/groups',  async (req, res) => { if(!bots[1].state.ready) return res.json([]); const c=await bots[1].client.getChats(); res.json(c.filter(x=>x.isGroup).map(x=>({name:x.name,count:x.participants?.length||0}))); });
+// Compat bot 1
+app.get('/api/status',  (req,res) => res.json(bots[1].getStatus()));
+app.post('/api/start',  (req,res) => { bots[1].state.paused=false; bots[1].runQueue(); res.json({ok:true}); });
+app.post('/api/pause',  (req,res) => { bots[1].state.paused=!bots[1].state.paused; res.json({ok:true}); });
+app.post('/api/clear',  (req,res) => { bots[1].clear(); res.json({ok:true}); });
+app.get('/api/groups',  async (req,res) => { if(!bots[1].state.ready) return res.json([]); const c=await bots[1].client.getChats(); res.json(c.filter(x=>x.isGroup).map(x=>({name:x.name,count:x.participants?.length||0}))); });
 
 app.listen(PORT, () => console.log(`WhatsApp Manager → http://localhost:${PORT}`));
