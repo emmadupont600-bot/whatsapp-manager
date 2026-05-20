@@ -29,7 +29,49 @@ function isBlacklisted(phone) {
   return loadBlacklist().some(p => p.replace(/\D/g,'') === clean);
 }
 
-// ─── Config par défaut ────────────────────────────────────────────────────────
+// ─── Planning (scheduled start) ─────────────────────────────────────────────
+// { accountId, scheduledAt (ISO), timerId }
+const schedules = {};
+function cancelSchedule(accountId) {
+  if (schedules[accountId]) {
+    clearTimeout(schedules[accountId].timerId);
+    delete schedules[accountId];
+  }
+}
+function setSchedule(bot, scheduledAt, relayBot) {
+  cancelSchedule(bot.id);
+  const ms = new Date(scheduledAt).getTime() - Date.now();
+  if (ms <= 0) return { ok: false, error: 'Heure dans le passé' };
+  const timerId = setTimeout(() => {
+    delete schedules[bot.id];
+    if (!bot.state.ready) { bot.log('⏰ Planning : non connecté au moment du démarrage', 'error'); return; }
+    bot.state.paused = false; bot.state.limitReached = false; bot.state.bannedAt = null;
+    bot.log(`⏰ Démarrage planifié déclenché`, 'success');
+    bot.runQueue(relayBot);
+  }, ms);
+  schedules[bot.id] = { scheduledAt, timerId };
+  bot.log(`📅 Démarrage planifié pour ${new Date(scheduledAt).toLocaleString('fr-FR')}`, 'warn');
+  return { ok: true, scheduledAt };
+}
+
+// ─── Historique de sessions (stats globales) ─────────────────────────────────
+const SESSIONS_FILE = path.join(__dirname, 'data', 'sessions.json');
+function loadSessions() {
+  if (!fs.existsSync(SESSIONS_FILE)) return [];
+  try { return JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf-8')); } catch(e) { return []; }
+}
+function saveSessions(sessions) {
+  const dir = path.dirname(SESSIONS_FILE);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(SESSIONS_FILE, JSON.stringify(sessions.slice(-500), null, 2));
+}
+function recordSessionEnd(botId, stats) {
+  const sessions = loadSessions();
+  sessions.push({ botId, date: new Date().toISOString(), ...stats });
+  saveSessions(sessions);
+}
+
+// ─── Config par défaut ───────────────────────────────────────────────────────
 let config = {
   minDelay:       parseInt(process.env.MIN_DELAY_S       || '90'),
   maxDelay:       parseInt(process.env.MAX_DELAY_S       || '180'),
@@ -67,8 +109,6 @@ function splitMessageAndLink(msg) {
   return { text, url };
 }
 
-// ─── Personnalisation du message ──────────────────────────────────────────────
-// Remplace {prénom}, {prenom}, {nom}, {name} par la valeur du contact
 function personalizeMessage(template, contact) {
   if (!template) return template;
   return template
@@ -90,7 +130,7 @@ function removeLocks(dir) {
   } catch(e) {}
 }
 
-// ─── BotAccount ─────────────────────────────────────────────────────────────
+// ─── BotAccount ──────────────────────────────────────────────────────────────
 class BotAccount {
   constructor(id) {
     this.id         = id;
@@ -107,8 +147,8 @@ class BotAccount {
       limitReached: false,
       limitReachedAt: null,
       resumeAt: null,
-      bannedAt: null,      // timestamp si ban détecté
-      repliesReceived: 0,  // compteur de réponses reçues
+      bannedAt: null,
+      repliesReceived: 0,
       log: [], stats: { sent: 0, failed: 0, skipped: 0, blacklisted: 0 }
     };
     this._loadQueue();
@@ -211,9 +251,7 @@ class BotAccount {
   }
 
   _recordFirstSend() {
-    if (!this.state.windowStart) {
-      this.state.windowStart = new Date().toISOString();
-    }
+    if (!this.state.windowStart) this.state.windowStart = new Date().toISOString();
   }
 
   _dailyLimitReached() {
@@ -221,19 +259,15 @@ class BotAccount {
     return this.state.dailySent >= this.dailyLimit;
   }
 
-  // ── Détection ban / rate-limit WhatsApp ────────────────────────────────────
   _detectBan(errMessage) {
-    const banPatterns = [
-      /rate.?limit/i, /too many/i, /spam/i, /blocked/i,
-      /account.*banned/i, /restrict/i, /ECONNRESET/i, /WAWebDisconnected/i
-    ];
+    const banPatterns = [/rate.?limit/i, /too many/i, /spam/i, /blocked/i, /account.*banned/i, /restrict/i, /ECONNRESET/i, /WAWebDisconnected/i];
     return banPatterns.some(p => p.test(errMessage));
   }
 
   _handleBan(err) {
-    this.state.running    = false;
-    this.state.bannedAt   = new Date().toISOString();
-    this.state.paused     = true;
+    this.state.running  = false;
+    this.state.bannedAt = new Date().toISOString();
+    this.state.paused   = true;
     this.log(`🚫 BAN / RESTRICTION DÉTECTÉ : ${err.message} — Bot arrêté pour protection`, 'error');
     this._saveQueue();
   }
@@ -272,15 +306,14 @@ class BotAccount {
         this.runQueue();
       }
     });
-    // ── Détection des réponses entrantes ───────────────────────────────────
     c.on('message', async msg => {
       if (msg.fromMe) return;
       const phone = msg.from.replace('@c.us','').replace(/\D/g,'');
       const contact = this.state.queue.find(x => x.phone.replace(/\D/g,'') === phone);
       if (contact && contact.status === 'done') {
-        contact.replied    = true;
-        contact.repliedAt  = new Date().toISOString();
-        contact.replyText  = msg.body ? msg.body.substring(0, 200) : '(media)';
+        contact.replied   = true;
+        contact.repliedAt = new Date().toISOString();
+        contact.replyText = msg.body ? msg.body.substring(0, 200) : '(media)';
         this.state.repliesReceived++;
         this.log(`💬 Réponse reçue de +${phone} : "${contact.replyText}"`, 'success');
         this._saveQueue();
@@ -353,11 +386,27 @@ class BotAccount {
     }
   }
 
+  // ── Envoi de test (numéro unique) ─────────────────────────────────────────
+  async sendTest(phone, message, link) {
+    if (!this.state.ready) throw new Error('WhatsApp non connecté');
+    const number = phone.replace(/\D/g,'');
+    const chatId = `${number}@c.us`;
+    const exists = await this.client.isRegisteredUser(chatId);
+    if (!exists) throw new Error(`+${number} n'est pas sur WhatsApp`);
+    const fakeContact = { phone: number, prenom: 'Test', nom: 'Test' };
+    const rawMsg = personalizeMessage(message || 'Message de test 👋', fakeContact);
+    const rawLink = personalizeMessage(link || '', fakeContact);
+    await this._sendMessage(chatId, rawMsg, rawLink);
+    this.log(`🧪 Message de test envoyé à +${number}`, 'success');
+  }
+
   // ── Queue principale ──────────────────────────────────────────────────────
   async runQueue(relayBot) {
     if (this.state.running) return;
     this.state.running = true;
     this.state.limitReached = false;
+    const startStats = { ...this.state.stats };
+    const startTime = Date.now();
     this.log(`🚀 Bot démarré (session ≤${config.sessionSize} msgs, limite/jour : ${this.dailyLimit})`, 'success');
 
     while (this.state.queue.some(c => c.status === 'pending')) {
@@ -375,10 +424,8 @@ class BotAccount {
           this.log(`🔁 Limite ${this.dailyLimit} msgs atteinte → relais vers Compte ${relayBot.id} (${remaining.length} contacts)`, 'warn');
           for (const c of remaining) {
             const cleanPhone = c.phone.replace(/\D/g,'');
-            // Anti-doublons inter-comptes : vérifier toutes les queue de l'autre bot
             const alreadyInRelay = relayBot.state.queue.some(
-              x => x.phone.replace(/\D/g,'') === cleanPhone &&
-                   ['pending','processing','done'].includes(x.status)
+              x => x.phone.replace(/\D/g,'') === cleanPhone && ['pending','processing','done'].includes(x.status)
             );
             if (!alreadyInRelay) {
               relayBot.state.queue.push({ ...c, status: 'pending', relayedFrom: this.id, relayedAt: new Date().toISOString() });
@@ -388,7 +435,7 @@ class BotAccount {
             c.status = 'relayed';
           }
           this._saveQueue(); relayBot._saveQueue();
-          if (!relayBot.state.running) { this.log(`▶️ Démarrage automatique du Compte ${relayBot.id}`, 'success'); relayBot.runQueue(this); }
+          if (!relayBot.state.running) relayBot.runQueue(this);
         } else {
           this.log(`⏸ Limite ${this.dailyLimit} atteinte. Quota reset dans ${Math.round(resetIn/3600000*10)/10}h`, 'warn');
           if (config.autoResume) this._scheduleAutoResume(relayBot);
@@ -411,14 +458,13 @@ class BotAccount {
         const number = contact.phone.replace(/\D/g,'');
         const chatId  = `${number}@c.us`;
 
-        // ── Vérification blacklist ───────────────────────────────────────
         if (isBlacklisted(number)) {
           contact.status = 'blacklisted'; this.state.stats.blacklisted++;
           this.log(`🚫 Blacklisté : +${number}`, 'warn');
           this._saveQueue(); await sleep(rand(1000, 3000)); continue;
         }
 
-        const exists  = await this.client.isRegisteredUser(chatId);
+        const exists = await this.client.isRegisteredUser(chatId);
         if (!exists) {
           contact.status = 'skipped'; this.state.stats.skipped++;
           this.log(`⏭️ Non inscrit : +${number}`, 'warn');
@@ -426,7 +472,6 @@ class BotAccount {
         }
         await sleep(rand(500, 2000));
 
-        // ── Personnalisation du message ─────────────────────────────────
         const rawMsg = personalizeMessage(
           (contact.message || '').trim() || process.env.DEFAULT_MESSAGE || 'Bonjour ! 👋',
           contact
@@ -445,9 +490,8 @@ class BotAccount {
         this._saveQueue();
         await this._delayMsg();
       } catch(err) {
-        // ── Détection ban ───────────────────────────────────────────────
         if (this._detectBan(err.message)) {
-          contact.status = 'pending'; // remet en attente pour ne pas perdre le contact
+          contact.status = 'pending';
           this._handleBan(err);
           break;
         }
@@ -456,23 +500,34 @@ class BotAccount {
         this._saveQueue(); await sleep(rand(30000, 60000));
       }
     }
+
     this.state.running = false;
     const stillPending = this.state.queue.some(c => c.status === 'pending');
     if (!stillPending && !this.state.bannedAt) this.log('🏁 Queue terminée', 'success');
+
+    // Enregistrement session pour les stats globales
+    const sentThisRun  = this.state.stats.sent    - (startStats.sent    || 0);
+    const skipThisRun  = this.state.stats.skipped - (startStats.skipped || 0);
+    const failThisRun  = this.state.stats.failed  - (startStats.failed  || 0);
+    if (sentThisRun + skipThisRun + failThisRun > 0) {
+      recordSessionEnd(this.id, {
+        sent:     sentThisRun,
+        skipped:  skipThisRun,
+        failed:   failThisRun,
+        duration: Math.round((Date.now() - startTime) / 1000)
+      });
+    }
     this._saveQueue();
   }
 
   importCSV(content, defaultMessage, defaultLink) {
     const records = csv.parse(content, { columns: true, skip_empty_lines: true });
-    let added = 0;
-    let blacklisted = 0;
+    let added = 0, blacklisted = 0;
     for (const row of records) {
       const phone = (row.telephone || row.phone || row['Telephone'] || row['Phone'] || Object.values(row)[0] || '').replace(/\D/g,'');
       if (!phone || phone.length < 8) continue;
-      // Lecture des colonnes prénom/nom (insensible à la casse)
       const prenom = row.prenom || row.prénom || row.firstname || row.first_name || row.Prenom || row['Prénom'] || '';
       const nom    = row.nom    || row.name   || row.lastname  || row.last_name  || row.Nom   || row['Nom']    || '';
-      // Vérification blacklist à l'import
       if (isBlacklisted(phone)) { blacklisted++; continue; }
       if (this.state.queue.find(c => c.phone.replace(/\D/g,'') === phone)) continue;
       this.state.queue.push({
@@ -514,6 +569,7 @@ class BotAccount {
       autoResume: config.autoResume,
       bannedAt: this.state.bannedAt,
       repliesReceived: this.state.repliesReceived,
+      scheduledAt: schedules[this.id]?.scheduledAt || null,
       minDelay: config.minDelay, maxDelay: config.maxDelay, sessionSize: config.sessionSize,
       log: this.state.log.slice(0, 50)
     };
@@ -541,17 +597,18 @@ class BotAccount {
   }
 }
 
-// ─── Deux comptes ────────────────────────────────────────────────────────────
+// ─── Deux comptes ─────────────────────────────────────────────────────────────
 const bots = { 1: new BotAccount(1), 2: new BotAccount(2) };
 function getBot(req) { const id = parseInt(req.params.account || req.query.account || '1'); return bots[id] || bots[1]; }
 function otherBot(bot) { return bot.id === 1 ? bots[2] : bots[1]; }
 
-// ─── Routes API ──────────────────────────────────────────────────────────────
+// ─── Routes API ───────────────────────────────────────────────────────────────
 app.get('/api/:account/status',  (req, res) => res.json(getBot(req).getStatus()));
 app.post('/api/:account/start',  (req, res) => {
   const b = getBot(req);
   if (!b.state.ready) return res.status(400).json({ ok: false, error: 'Non connecté' });
   b.state.paused = false; b.state.limitReached = false; b.state.bannedAt = null;
+  cancelSchedule(b.id);
   b.runQueue(otherBot(b));
   res.json({ ok: true });
 });
@@ -569,7 +626,105 @@ app.post('/api/:account/set-limit', (req, res) => {
   res.json({ ok: true, limit });
 });
 
-// ── Blacklist ────────────────────────────────────────────────────────────────
+// ── Planning (démarrage planifié) ─────────────────────────────────────────────
+app.post('/api/:account/schedule', (req, res) => {
+  const b = getBot(req);
+  const { scheduledAt } = req.body; // ISO string ex: "2026-05-21T09:00:00"
+  if (!scheduledAt) return res.status(400).json({ ok: false, error: 'scheduledAt requis' });
+  const result = setSchedule(b, scheduledAt, otherBot(b));
+  if (!result.ok) return res.status(400).json(result);
+  res.json(result);
+});
+app.delete('/api/:account/schedule', (req, res) => {
+  cancelSchedule(getBot(req).id);
+  res.json({ ok: true });
+});
+
+// ── Message de test ───────────────────────────────────────────────────────────
+app.post('/api/:account/test-message', async (req, res) => {
+  try {
+    const b = getBot(req);
+    const { phone, message, link } = req.body;
+    if (!phone) return res.status(400).json({ ok: false, error: 'Numéro requis' });
+    await b.sendTest(phone, message, link);
+    res.json({ ok: true });
+  } catch(e) { res.status(400).json({ ok: false, error: e.message }); }
+});
+
+// ── Stats globales (toutes sessions) ─────────────────────────────────────────
+app.get('/api/stats', (req, res) => {
+  const sessions = loadSessions();
+  const totalSent    = sessions.reduce((s, x) => s + (x.sent    || 0), 0);
+  const totalSkipped = sessions.reduce((s, x) => s + (x.skipped || 0), 0);
+  const totalFailed  = sessions.reduce((s, x) => s + (x.failed  || 0), 0);
+  const total = totalSent + totalSkipped + totalFailed;
+  const deliveryRate = total > 0 ? Math.round(totalSent   / total * 100) : 0;
+  const skipRate     = total > 0 ? Math.round(totalSkipped/ total * 100) : 0;
+  // Dernières 30 sessions pour graphique
+  const last30 = sessions.slice(-30).map(s => ({
+    date:     s.date,
+    botId:    s.botId,
+    sent:     s.sent    || 0,
+    skipped:  s.skipped || 0,
+    failed:   s.failed  || 0,
+    duration: s.duration || 0
+  }));
+  res.json({ totalSent, totalSkipped, totalFailed, total, deliveryRate, skipRate, sessions: last30 });
+});
+
+// ── Queue filtrée par statut ──────────────────────────────────────────────────
+// GET /api/1/queue?status=failed  (status peut être: pending, done, failed, skipped, blacklisted, relayed, replied)
+app.get('/api/:account/queue', (req, res) => {
+  const bot = getBot(req);
+  const { status, page = 1, limit = 50 } = req.query;
+  let items = bot.state.queue;
+  if (status === 'replied') {
+    items = items.filter(c => c.replied === true);
+  } else if (status) {
+    items = items.filter(c => c.status === status);
+  }
+  const total = items.length;
+  const start = (parseInt(page) - 1) * parseInt(limit);
+  const slice = items.slice(start, start + parseInt(limit));
+  res.json({ total, page: parseInt(page), items: slice });
+});
+
+// ── Export filtré par statut ──────────────────────────────────────────────────
+app.get('/api/:account/export', (req, res) => {
+  const bot = getBot(req);
+  const { status } = req.query;
+  let items = bot.state.queue;
+  if (status === 'replied') {
+    items = items.filter(c => c.replied === true);
+  } else if (status) {
+    items = items.filter(c => c.status === status);
+  }
+  const rows = items.map(c => ({
+    telephone: c.phone, prenom: c.prenom||'', nom: c.nom||'',
+    statut: c.status, replied: c.replied ? 'Oui' : 'Non',
+    reply_text: c.replyText || '',
+    message: c.message, link: c.link||'',
+    ajoute_le: c.addedAt, envoye_le: c.sentAt||''
+  }));
+  const suffix = status ? `_${status}` : '';
+  res.setHeader('Content-Type','text/csv');
+  res.setHeader('Content-Disposition',`attachment; filename="export_bot${bot.id}${suffix}.csv"`);
+  res.send(stringify(rows, { header: true }));
+});
+
+app.post('/api/:account/import', upload.single('file'), (req, res) => {
+  try {
+    const content = fs.readFileSync(req.file.path, 'utf-8');
+    const message = (req.body.message || '').trim();
+    const link    = (req.body.link    || '').trim();
+    if (!message) return res.status(400).json({ ok: false, error: 'Message vide' });
+    const result = getBot(req).importCSV(content, message, link);
+    fs.unlinkSync(req.file.path);
+    res.json({ ok: true, ...result });
+  } catch(e) { res.status(400).json({ ok: false, error: e.message }); }
+});
+
+// ── Blacklist ─────────────────────────────────────────────────────────────────
 app.get('/api/blacklist', (req, res) => res.json({ list: loadBlacklist() }));
 app.post('/api/blacklist/add', (req, res) => {
   const phone = (req.body.phone || '').replace(/\D/g,'');
@@ -600,7 +755,7 @@ app.post('/api/blacklist/import', upload.single('file'), (req, res) => {
   } catch(e) { res.status(400).json({ ok: false, error: e.message }); }
 });
 
-// ── Config globale ────────────────────────────────────────────────────────
+// ── Config globale ────────────────────────────────────────────────────────────
 app.get('/api/config', (req, res) => res.json(config));
 app.post('/api/config', (req, res) => {
   const allowed = ['minDelay','maxDelay','sessionSize','autoResume'];
@@ -609,32 +764,7 @@ app.post('/api/config', (req, res) => {
   res.json({ ok: true, config });
 });
 
-app.get('/api/:account/export', (req, res) => {
-  const bot = getBot(req);
-  const rows = bot.state.queue.map(c => ({
-    telephone: c.phone, prenom: c.prenom||'', nom: c.nom||'',
-    statut: c.status, replied: c.replied ? 'Oui' : 'Non',
-    reply_text: c.replyText || '',
-    message: c.message, link: c.link||'',
-    ajoute_le: c.addedAt, envoye_le: c.sentAt||''
-  }));
-  res.setHeader('Content-Type','text/csv');
-  res.setHeader('Content-Disposition',`attachment; filename="export_bot${bot.id}.csv"`);
-  res.send(stringify(rows, { header: true }));
-});
-
-app.post('/api/:account/import', upload.single('file'), (req, res) => {
-  try {
-    const content = fs.readFileSync(req.file.path, 'utf-8');
-    const message = (req.body.message || '').trim();
-    const link    = (req.body.link    || '').trim();
-    if (!message) return res.status(400).json({ ok: false, error: 'Message vide' });
-    const result = getBot(req).importCSV(content, message, link);
-    fs.unlinkSync(req.file.path);
-    res.json({ ok: true, ...result });
-  } catch(e) { res.status(400).json({ ok: false, error: e.message }); }
-});
-
+// ── Export groupe WA avec prénom/nom ──────────────────────────────────────────
 app.get('/api/:account/groups', async (req, res) => {
   const bot = getBot(req);
   if (!bot.state.ready) return res.json([]);
@@ -646,11 +776,27 @@ app.get('/api/:account/export-group/:name', async (req, res) => {
   const bot = getBot(req);
   if (!bot.state.ready) return res.status(400).json({ ok: false, error: 'Non connecté' });
   const chats = await bot.client.getChats();
-  const group = chats.find(c => c.isGroup && c.name === req.params.name);
+  const groupName = decodeURIComponent(req.params.name);
+  const group = chats.find(c => c.isGroup && c.name === groupName);
   if (!group) return res.status(404).json({ ok: false, error: 'Groupe introuvable' });
-  const rows = group.participants.map(p => ({ telephone: `+${p.id.user}`, admin: p.isAdmin?'Oui':'Non' }));
+
+  // Récupérer le nom de chaque participant depuis le carnet d'adresses WA
+  const rows = [];
+  for (const p of group.participants) {
+    let prenom = '', nom = '';
+    try {
+      const contact = await bot.client.getContactById(`${p.id.user}@c.us`);
+      const displayName = contact.pushname || contact.name || '';
+      // Tenter de séparer prénom / nom sur le premier espace
+      const parts = displayName.trim().split(/\s+/);
+      prenom = parts[0] || '';
+      nom    = parts.slice(1).join(' ') || '';
+    } catch(e) {}
+    rows.push({ telephone: `+${p.id.user}`, prenom, nom, admin: p.isAdmin?'Oui':'Non' });
+  }
+
   res.setHeader('Content-Type','text/csv');
-  res.setHeader('Content-Disposition',`attachment; filename="${group.name}.csv"`);
+  res.setHeader('Content-Disposition',`attachment; filename="${groupName}.csv"`);
   res.send(stringify(rows, { header: true }));
 });
 
