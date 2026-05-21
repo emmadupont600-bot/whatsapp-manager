@@ -291,7 +291,7 @@ let config = {
   typingMax:      parseInt(process.env.TYPING_MAX_MS     || '6000'),
   linkDelayMin:   parseInt(process.env.LINK_DELAY_MIN_MS || '10000'),
   linkDelayMax:   parseInt(process.env.LINK_DELAY_MAX_MS || '18000'),
-  maxMessagesPerHour: parseInt(process.env.MAX_MSGS_PER_HOUR || '40'),
+  maxMessagesPerHour: parseInt(process.env.MAX_MSGS_PER_HOUR || '80'),
   dailyLimit:     {},
   autoResume:     true,
   /** Afficher le quota en « contacts » (texte+lien) : limite ÷ 2 côté UI */
@@ -321,6 +321,11 @@ function saveConfig() {
 
 const rand  = (a, b) => a + Math.random() * (b - a);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+function whatsappMsgId(msg) {
+  if (!msg || !msg.id) return null;
+  return msg.id._serialized || msg.id.id || (typeof msg.id === 'string' ? msg.id : null);
+}
 
 const URL_RE = /(https?:\/\/[^\s]+)/i;
 function splitMessageAndLink(msg) {
@@ -405,6 +410,7 @@ class BotAccount {
     this._resumeTimer    = null;
     this._logFlushTimer  = null;
     this._saveQueueTimer = null;
+    this._queueLoopActive = false;
     this.state = {
       qr: null, ready: false, running: false, paused: false,
       queue: [], sessionCount: 0,
@@ -558,18 +564,37 @@ class BotAccount {
 
   _hourlyWouldExceed(additional) {
     this._pruneSendTimestamps();
-    const max = config.maxMessagesPerHour || 40;
+    const max = config.maxMessagesPerHour || 80;
+    if (max <= 0) return false;
     return (this.state.sendTimestamps.length + additional) > max;
   }
 
   async _waitForHourlyCapacity(needed) {
+    let waits = 0;
     while (this._hourlyWouldExceed(needed)) {
       if (!this.state.running) return false;
-      this.log(`⏳ Limite horaire (~${config.maxMessagesPerHour} msgs/h anti-ban) — pause 5 min`, 'warn');
+      waits++;
+      if (waits > 24) {
+        this.log('❌ Limite horaire toujours atteinte après 2h — arrêt', 'error');
+        return false;
+      }
+      this.log(`⏳ Limite horaire (~${config.maxMessagesPerHour} msgs/h) — pause 5 min (${this.state.sendTimestamps.length} envoyés cette heure)`, 'warn');
       await sleep(5 * 60 * 1000);
       this._pruneSendTimestamps();
     }
     return true;
+  }
+
+  _resetStuckContacts() {
+    let fixed = 0;
+    this.state.queue.forEach(c => {
+      if (c.status === 'processing') { c.status = 'pending'; fixed++; }
+    });
+    if (fixed > 0) {
+      this.log(`♻️ ${fixed} contact(s) débloqué(s) (statut processing → pending)`, 'warn');
+      this._saveQueue(true);
+    }
+    return fixed;
   }
 
   _estimateQueueSeconds() {
@@ -678,10 +703,11 @@ class BotAccount {
     const chat = await this.client.getChatById(chatId);
     const ids = [];
     const assertSent = (msg, label) => {
-      if (!msg || !msg.id || !msg.id._serialized)
-        throw new Error(`sendMessage() n'a pas retourné d'accusé de réception WhatsApp (${label}). Session peut-être expirée.`);
-      ids.push(msg.id._serialized);
-      return msg.id._serialized;
+      const id = whatsappMsgId(msg);
+      if (!id)
+        throw new Error(`sendMessage() sans accusé WhatsApp (${label}). Reconnectez le compte.`);
+      ids.push(id);
+      return id;
     };
     if (link && link.trim()) {
       const text = (rawMsg || '').trim();
@@ -735,17 +761,45 @@ class BotAccount {
   }
 
   async runQueue(relayBot) {
-    if (this.state.running) return;
+    if (this._queueLoopActive) {
+      this.log('⚠️ Envoi déjà en cours', 'warn');
+      return;
+    }
+    this._resetStuckContacts();
+    const pendingCount = this.state.queue.filter(c => c.status === 'pending').length;
+    if (!pendingCount) {
+      this.log('ℹ️ Aucun contact en attente dans la queue', 'warn');
+      return;
+    }
+    if (!this.state.ready) {
+      this.log('❌ WhatsApp non connecté — scannez le QR dans l’onglet Connexion', 'error');
+      return;
+    }
+    if (this._dailyLimitReached()) {
+      this.log(`⏸ Quota journalier atteint (${this.state.dailySent}/${this.dailyLimit} msgs WA)`, 'warn');
+      this.state.limitReached = true;
+      return;
+    }
+
+    this._queueLoopActive = true;
     this.state.running = true;
     this.state.limitReached = false;
     const startStats={...this.state.stats}, startTime=Date.now();
-    this.log(`🚀 Bot démarré (${config.sessionSize} contacts/session, quota : ${this.dailyLimit} messages WhatsApp/24h, ~${config.maxMessagesPerHour}/h)`,'success');
+    let notReadyTicks = 0;
+    this.log(`🚀 Démarrage : ${pendingCount} contact(s) · quota ${this.state.dailySent}/${this.dailyLimit} msgs WA`,'success');
 
+    try {
     while (this.state.queue.some(c => c.status === 'pending')) {
-      // FIX : vérifier running en tête de boucle pour permettre un arrêt propre
-      // si state.running est passé à false pendant un await long (pause, délai, etc.)
       if (!this.state.running) break;
-      if (!this.state.ready) { await sleep(10000); continue; }
+      if (!this.state.ready) {
+        notReadyTicks++;
+        if (notReadyTicks === 1 || notReadyTicks % 6 === 0) {
+          this.log('⏳ En attente connexion WhatsApp (scannez le QR si besoin)...', 'warn');
+        }
+        await sleep(10000);
+        continue;
+      }
+      notReadyTicks = 0;
       if (this.state.paused)  { await sleep(3000);  continue; }
 
       if (this._dailyLimitReached()) {
@@ -824,7 +878,12 @@ class BotAccount {
           } else if (config.autoResume) this._scheduleAutoResume(relay);
           this._saveQueue(true); break;
         }
-        if (!(await this._waitForHourlyCapacity(msgCount))) break;
+        if (!(await this._waitForHourlyCapacity(msgCount))) {
+          contact.status = 'pending';
+          this._saveQueue(true);
+          this.log('⏸ Arrêt : limite horaire anti-ban', 'warn');
+          break;
+        }
         this._recordFirstSend();
         const result = await this._sendMessage(chatId, rawMsg, personalizedLink);
         contact.status='done'; contact.sentAt=new Date().toISOString();
@@ -841,21 +900,25 @@ class BotAccount {
         if (!this.state.running) break;
       } catch(err) {
         if (this._detectBan(err.message)) { contact.status='pending'; this._handleBan(err); break; }
-        contact.status='failed'; this.state.stats.failed++;
+        if (contact.status === 'processing') contact.status = 'failed';
+        this.state.stats.failed++;
         this.log(`❌ Erreur ${contact.phone} : ${err.message}`,'error');
         this._saveQueue(); await sleep(rand(30000,60000));
         if (!this.state.running) break;
       }
     }
-
-    this.state.running=false;
-    if (!this.state.queue.some(c=>c.status==='pending')&&!this.state.bannedAt) this.log('🏁 Queue terminée','success');
-    const sentThisRun=this.state.stats.sent-(startStats.sent||0);
-    const skipThisRun=this.state.stats.skipped-(startStats.skipped||0);
-    const failThisRun=this.state.stats.failed-(startStats.failed||0);
-    if (sentThisRun+skipThisRun+failThisRun>0)
-      recordSessionEnd(this.id,{sent:sentThisRun,skipped:skipThisRun,failed:failThisRun,duration:Math.round((Date.now()-startTime)/1000)});
-    this._saveQueue(true);
+    } finally {
+      this._queueLoopActive = false;
+      this.state.running = false;
+      this._resetStuckContacts();
+      if (!this.state.queue.some(c=>c.status==='pending')&&!this.state.bannedAt) this.log('🏁 Queue terminée','success');
+      const sentThisRun=this.state.stats.sent-(startStats.sent||0);
+      const skipThisRun=this.state.stats.skipped-(startStats.skipped||0);
+      const failThisRun=this.state.stats.failed-(startStats.failed||0);
+      if (sentThisRun+skipThisRun+failThisRun>0)
+        recordSessionEnd(this.id,{sent:sentThisRun,skipped:skipThisRun,failed:failThisRun,duration:Math.round((Date.now()-startTime)/1000)});
+      this._saveQueue(true);
+    }
   }
 
   importCSV(content, defaultMessage, defaultLink, forceIncludeDuplicates = []) {
@@ -997,17 +1060,41 @@ function otherBot(bot){return bot.id===1?bots[2]:bots[1];}
 app.get('/api/:account/status', (req,res)=>{ const b=requireBot(req,res); if(!b) return; res.json(b.getStatus()); });
 app.post('/api/:account/start', (req,res)=>{
   const b=requireBot(req,res); if(!b) return;
-  if(!b.state.ready) return res.status(400).json({ok:false,error:'Non connecté'});
+  if(!b.state.ready) return res.status(400).json({ok:false,error:'WhatsApp non connecté — onglet Connexion, scannez le QR code'});
+  const pending = b.state.queue.filter(c => c.status === 'pending').length;
+  if (!pending) return res.status(400).json({ok:false,error:'Aucun contact en attente — importez un CSV d’abord'});
+  if (b._dailyLimitReached()) {
+    return res.status(400).json({
+      ok:false,
+      error:`Quota atteint (${b.state.dailySent}/${b.dailyLimit} messages WA). Attendez le reset ou augmentez la limite.`,
+      limitReached:true
+    });
+  }
   b.state.paused=false; b.state.limitReached=false; b.state.bannedAt=null;
-  cancelSchedule(b.id); b.runQueue(otherBot(b)); res.json({ok:true});
+  cancelSchedule(b.id);
+  b.runQueue(otherBot(b));
+  res.json({ok:true, pending, dailySent:b.state.dailySent, dailyLimit:b.dailyLimit});
 });
 // FIX : pause annule aussi le planning si actif (cohérence avec clear/reset)
 app.post('/api/:account/pause', (req,res)=>{
   const b=requireBot(req,res); if(!b) return;
   b.state.paused=!b.state.paused;
-  if (b.state.paused) cancelSchedule(b.id);
+  if (b.state.paused) {
+    cancelSchedule(b.id);
+    b.state.running = false;
+    b._resetStuckContacts();
+  }
   b.log(b.state.paused?'⏸️ Pause (planning annulé si actif)':'▶️ Reprise','warn');
   res.json({ok:true,paused:b.state.paused});
+});
+
+app.post('/api/:account/unstick', (req,res)=>{
+  const b=requireBot(req,res); if(!b) return;
+  b.state.running = false;
+  b._queueLoopActive = false;
+  const fixed = b._resetStuckContacts();
+  b.log('🔧 Queue débloquée manuellement', 'warn');
+  res.json({ok:true, fixed});
 });
 app.post('/api/:account/clear', (req,res)=>{ const b=requireBot(req,res); if(!b) return; cancelSchedule(b.id); b.clear(); res.json({ok:true}); });
 app.post('/api/:account/reset', (req,res)=>{ const b=requireBot(req,res); if(!b) return; cancelSchedule(b.id); b.reset(); res.json({ok:true}); });

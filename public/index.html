@@ -297,6 +297,7 @@ tr:hover td{background:var(--surface2)}
         <div class="btn-row" style="margin-bottom:12px">
           <button class="btn btn-primary" onclick="startBot()">▶ Démarrer</button>
           <button class="btn btn-ghost" onclick="pauseBot()" id="btn-pause">⏸ Pause</button>
+          <button class="btn btn-ghost" onclick="unstickQueue()" title="Débloquer si la queue semble bloquée">🔧 Débloquer</button>
           <button class="btn btn-ghost" onclick="exportCSV()">⬇ Exporter CSV</button>
           <button class="btn btn-danger" onclick="clearQueue()">🗑 Vider</button>
         </div>
@@ -1343,8 +1344,18 @@ async function fetchStatus() {
 /* ═══════════════════════════════════════════════════
    BOT CONTROLS
 ═══════════════════════════════════════════════════ */
-async function startBot()  { const r=await fetch(`/api/${currentAccount}/start`,{method:'POST'}).then(r=>r.json()); if(!r.ok) alert('Erreur : '+r.error); }
-async function pauseBot()  { await fetch(`/api/${currentAccount}/pause`,{method:'POST'}); }
+async function startBot()  {
+  const r=await fetch(`/api/${currentAccount}/start`,{method:'POST'}).then(x=>x.json()).catch(()=>({ok:false,error:'Erreur réseau'}));
+  if(!r.ok) alert(r.error||'Impossible de démarrer le bot');
+  else fetchStatus();
+}
+async function pauseBot()  { await fetch(`/api/${currentAccount}/pause`,{method:'POST'}); fetchStatus(); }
+async function unstickQueue() {
+  const r = await fetch(`/api/${currentAccount}/unstick`,{method:'POST'}).then(x=>x.json()).catch(()=>({}));
+  if (r.fixed) alert(`${r.fixed} contact(s) débloqué(s). Cliquez Démarrer.`);
+  else alert('Queue débloquée. Cliquez Démarrer.');
+  fetchStatus();
+}
 async function clearQueue(){ if(!confirm('Vider la queue du compte '+currentAccount+' ?')) return; await fetch(`/api/${currentAccount}/clear`,{method:'POST'}); }
 function exportCSV()       { window.open(`/api/${currentAccount}/export`,'_blank'); }
 
