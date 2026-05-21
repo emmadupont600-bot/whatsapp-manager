@@ -14,13 +14,6 @@ app.use(express.static(path.join(__dirname, 'public')));
 const upload = multer({ dest: 'uploads/' });
 
 // FIX #9 : nettoyage automatique du dossier uploads/.
-// Avant : les fichiers uploadés temporairement (CSV imports) restaient sur le
-// disque indéfiniment en cas de bug ou de crash survenu avant fs.unlinkSync.
-// Désormais :
-//   - cleanUploadsDir() supprime tous les fichiers de plus de MAX_AGE_MS (1h)
-//     au démarrage du serveur et toutes les heures via setInterval.
-//   - Tout fichier laissé par un crash ou une erreur non gérée sera purgé au
-//     plus tard 1 heure après sa création.
 const UPLOADS_DIR  = path.join(__dirname, 'uploads');
 const MAX_AGE_MS   = 60 * 60 * 1000; // 1 heure
 
@@ -40,7 +33,6 @@ function cleanUploadsDir() {
   } catch (_) {}
 }
 
-// Nettoyage immédiat au démarrage, puis toutes les heures
 cleanUploadsDir();
 setInterval(cleanUploadsDir, MAX_AGE_MS);
 
@@ -62,7 +54,6 @@ function isBlacklisted(phone, cachedList) {
 }
 
 // ─── Historique global des contacts déjà envoyés ────────────────────────────
-// Structure : { phone: { sentAt, botId, message, prenom, nom } }
 const SENT_HISTORY_FILE = path.join(__dirname, 'data', 'sent-history.json');
 function loadSentHistory() {
   if (!fs.existsSync(SENT_HISTORY_FILE)) return {};
@@ -105,7 +96,6 @@ function cancelSchedule(accountId) {
   if (schedules[accountId]) { clearTimeout(schedules[accountId].timerId); delete schedules[accountId]; }
 }
 
-// FIX #6 : validation robuste de scheduledAt avant toute planification.
 function parseScheduledAt(scheduledAt) {
   if (!scheduledAt || typeof scheduledAt !== 'string') {
     return { ok: false, error: 'scheduledAt doit être une chaîne de caractères' };
@@ -156,6 +146,30 @@ function recordSessionEnd(botId, stats) {
 }
 
 // ─── Config par défaut ───────────────────────────────────────────────────────
+// FIX #10 : dailyLimit n'est plus un objet figé {1: N, 2: N}.
+// Avant : seuls les IDs 1 et 2 étaient pré-remplis. Ajouter un 3ème bot ou
+// appeler set-limit sur un ID non prévu produisait un comportement non défini.
+// Désormais dailyLimit est un Proxy : lire dailyLimit[id] pour un ID inconnu
+// retourne DEFAULT_DAILY_LIMIT au lieu de undefined, et set-limit écrit
+// dynamiquement l'entrée pour cet ID. La valeur par défaut est centralisée
+// dans DEFAULT_DAILY_LIMIT afin d'être référencée de manière cohérente.
+const DEFAULT_DAILY_LIMIT = parseInt(process.env.DAILY_LIMIT || '300');
+
+// Stockage réel des limites personnalisées (rempli à la demande par set-limit).
+const _dailyLimitOverrides = {};
+
+// Proxy : lecture transparente avec fallback sur DEFAULT_DAILY_LIMIT.
+const dailyLimitMap = new Proxy(_dailyLimitOverrides, {
+  get(target, id) {
+    const numId = typeof id === 'symbol' ? id : Number(id);
+    return target[numId] !== undefined ? target[numId] : DEFAULT_DAILY_LIMIT;
+  },
+  set(target, id, value) {
+    target[Number(id)] = value;
+    return true;
+  }
+});
+
 let config = {
   minDelay:       parseInt(process.env.MIN_DELAY_S       || '90'),
   maxDelay:       parseInt(process.env.MAX_DELAY_S       || '180'),
@@ -166,16 +180,29 @@ let config = {
   typingMax:      parseInt(process.env.TYPING_MAX_MS     || '6000'),
   linkDelayMin:   parseInt(process.env.LINK_DELAY_MIN_MS || '8000'),
   linkDelayMax:   parseInt(process.env.LINK_DELAY_MAX_MS || '15000'),
-  dailyLimit:     { 1: parseInt(process.env.DAILY_LIMIT || '300'), 2: parseInt(process.env.DAILY_LIMIT || '300') },
+  // dailyLimit est maintenant géré via dailyLimitMap (Proxy dynamique).
+  // On garde la clé dans config uniquement pour la compatibilité avec saveConfig/loadConfig.
+  dailyLimit:     {},
   autoResume:     true
 };
 const CONFIG_FILE = path.join(__dirname, 'data', 'config.json');
 if (fs.existsSync(CONFIG_FILE)) {
-  try { const saved = JSON.parse(fs.readFileSync(CONFIG_FILE,'utf-8')); Object.assign(config, saved); } catch(e) {}
+  try {
+    const saved = JSON.parse(fs.readFileSync(CONFIG_FILE,'utf-8'));
+    Object.assign(config, saved);
+    // Restaure les overrides persistés dans dailyLimitMap
+    if (saved.dailyLimit && typeof saved.dailyLimit === 'object') {
+      for (const [id, val] of Object.entries(saved.dailyLimit)) {
+        dailyLimitMap[id] = parseInt(val);
+      }
+    }
+  } catch(e) {}
 }
 function saveConfig() {
   const dir = path.dirname(CONFIG_FILE);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  // Synchronise config.dailyLimit avec les overrides actuels avant sauvegarde
+  config.dailyLimit = { ..._dailyLimitOverrides };
   fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
 }
 
@@ -223,7 +250,6 @@ class BotAccount {
     this.client     = null;
     this.retryCount = 0;
     this._resumeTimer = null;
-    // FIX #2 : verrou atomique pour éviter la race condition dans runQueue.
     this._starting  = false;
     this.state = {
       qr: null, ready: false, running: false, paused: false,
@@ -242,7 +268,9 @@ class BotAccount {
     this._initClient();
   }
 
-  get dailyLimit() { return config.dailyLimit[this.id] || 300; }
+  // FIX #10 : dailyLimit lit depuis dailyLimitMap (Proxy) au lieu de
+  // config.dailyLimit[this.id] qui était undefined pour tout ID != 1 ou 2.
+  get dailyLimit() { return dailyLimitMap[this.id]; }
 
   _loadQueue() {
     if (fs.existsSync(this.dataFile)) {
@@ -459,7 +487,6 @@ class BotAccount {
     this.log(`🧪 Message de test envoyé à +${number}`,'success');
   }
 
-  // FIX #2 : protection contre la race condition via flag atomique _starting.
   async runQueue(relayBot) {
     if (this.state.running || this._starting) return;
     this._starting = true;
@@ -557,7 +584,6 @@ class BotAccount {
     this._saveQueue();
   }
 
-  // FIX #5 : blacklist et sent-history chargés une seule fois avant la boucle
   importCSV(content, defaultMessage, defaultLink, forceIncludeDuplicates = []) {
     const records = csv.parse(content, { columns: true, skip_empty_lines: true });
     const blacklistCache = loadBlacklist();
@@ -650,7 +676,6 @@ class BotAccount {
 // ─── Deux comptes ─────────────────────────────────────────────────────────────
 const bots={1:new BotAccount(1),2:new BotAccount(2)};
 
-// FIX #7 : getBot() ne fait plus de fallback silencieux sur bots[1].
 function getBot(req) {
   const id = parseInt(req.params.account || req.query.account || '');
   return (!isNaN(id) && bots[id]) ? bots[id] : null;
@@ -677,11 +702,15 @@ app.post('/api/:account/pause', (req,res)=>{ const b=requireBot(req,res); if(!b)
 app.post('/api/:account/clear', (req,res)=>{ const b=requireBot(req,res); if(!b) return; b.clear(); res.json({ok:true}); });
 app.post('/api/:account/reset', (req,res)=>{ const b=requireBot(req,res); if(!b) return; b.reset(); res.json({ok:true}); });
 
+// FIX #10 : set-limit écrit dans dailyLimitMap au lieu de config.dailyLimit[b.id],
+// ce qui fonctionnait avant uniquement parce que les IDs 1 et 2 étaient pré-remplis.
 app.post('/api/:account/set-limit', (req,res)=>{
   const b=requireBot(req,res); if(!b) return;
   const limit=parseInt(req.body.limit);
   if(!limit||limit<1||limit>1000) return res.status(400).json({ok:false,error:'Limite invalide (1-1000)'});
-  config.dailyLimit[b.id]=limit; saveConfig(); b.log(`⚙️ Limite modifiée → ${limit} msgs/24h`,'warn');
+  dailyLimitMap[b.id]=limit;
+  saveConfig();
+  b.log(`⚙️ Limite modifiée → ${limit} msgs/24h`,'warn');
   res.json({ok:true,limit});
 });
 
@@ -739,7 +768,6 @@ app.get('/api/:account/export', (req,res)=>{
   res.send(stringify(rows,{header:true}));
 });
 
-// FIX #1 : fichier uploadé supprimé dans finally + guard req.file
 app.post('/api/:account/import', upload.single('file'), (req,res)=>{
   const bot=requireBot(req,res); if(!bot) return;
   if (!req.file) return res.status(400).json({ok:false,error:'Fichier manquant'});
@@ -801,7 +829,6 @@ app.post('/api/blacklist/remove', (req,res)=>{
   saveBlacklist(list); res.json({ok:true,total:list.length});
 });
 
-// FIX #1 : même correction pour /blacklist/import
 app.post('/api/blacklist/import', upload.single('file'), (req,res)=>{
   if (!req.file) return res.status(400).json({ok:false,error:'Fichier manquant'});
   let added=0, total=0;
@@ -823,7 +850,10 @@ app.post('/api/blacklist/import', upload.single('file'), (req,res)=>{
   res.json({ok:true,added,total});
 });
 
-app.get('/api/config',(req,res)=>res.json(config));
+app.get('/api/config',(req,res)=>{
+  // FIX #10 : expose dailyLimit comme objet lisible avec toutes les overrides
+  res.json({ ...config, dailyLimit: { ..._dailyLimitOverrides } });
+});
 app.post('/api/config',(req,res)=>{
   const allowed=['minDelay','maxDelay','sessionSize','autoResume'];
   for(const k of allowed)if(req.body[k]!==undefined)config[k]=req.body[k];
@@ -853,7 +883,6 @@ app.get('/api/:account/export-group/:name',async(req,res)=>{
   res.send(stringify(rows,{header:true}));
 });
 
-// Compat bot 1
 app.get('/api/status',(req,res)=>res.json(bots[1].getStatus()));
 app.post('/api/start',(req,res)=>{
   if(!bots[1].state.ready) return res.status(400).json({ok:false,error:'Non connecté'});
