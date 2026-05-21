@@ -75,10 +75,6 @@ function cancelSchedule(accountId) {
 }
 
 // FIX #6 : validation robuste de scheduledAt avant toute planification.
-// Avant : new Date(scheduledAt).getTime() retournait NaN pour une valeur
-// invalide, rendant ms <= 0 toujours true et l'erreur "Heure dans le passé"
-// silencieuse et trompeuse. Désormais on rejette explicitement les valeurs
-// non-parsables et celles qui ne sont pas dans le futur (min 30 secondes).
 function parseScheduledAt(scheduledAt) {
   if (!scheduledAt || typeof scheduledAt !== 'string') {
     return { ok: false, error: 'scheduledAt doit être une chaîne de caractères' };
@@ -533,7 +529,6 @@ class BotAccount {
   // FIX #5 : blacklist et sent-history chargés une seule fois avant la boucle
   importCSV(content, defaultMessage, defaultLink, forceIncludeDuplicates = []) {
     const records = csv.parse(content, { columns: true, skip_empty_lines: true });
-    // Chargement unique en mémoire pour toute la durée de l'import
     const blacklistCache = loadBlacklist();
     const sentHistoryCache = loadSentHistory();
 
@@ -623,46 +618,62 @@ class BotAccount {
 
 // ─── Deux comptes ─────────────────────────────────────────────────────────────
 const bots={1:new BotAccount(1),2:new BotAccount(2)};
-function getBot(req){const id=parseInt(req.params.account||req.query.account||'1');return bots[id]||bots[1];}
+
+// FIX #7 : getBot() ne fait plus de fallback silencieux sur bots[1].
+// Avant : bots[id] || bots[1] retournait bots[1] pour tout ID inconnu (ex: 3,
+// 99, "abc"), sans avertissement. Le client opérait alors sur le mauvais compte
+// sans le savoir. Désormais, un ID invalide renvoie null, et chaque handler de
+// route vérifie explicitement via requireBot() qui répond 404 si besoin.
+function getBot(req) {
+  const id = parseInt(req.params.account || req.query.account || '');
+  return (!isNaN(id) && bots[id]) ? bots[id] : null;
+}
+// Middleware : résout le bot ou répond 404 immédiatement.
+function requireBot(req, res) {
+  const bot = getBot(req);
+  if (!bot) {
+    res.status(404).json({ ok: false, error: `Compte invalide. Comptes disponibles : ${Object.keys(bots).join(', ')}` });
+    return null;
+  }
+  return bot;
+}
 function otherBot(bot){return bot.id===1?bots[2]:bots[1];}
 
 // ─── Routes API ───────────────────────────────────────────────────────────────
-app.get('/api/:account/status', (req,res)=>res.json(getBot(req).getStatus()));
+app.get('/api/:account/status', (req,res)=>{ const b=requireBot(req,res); if(!b) return; res.json(b.getStatus()); });
 app.post('/api/:account/start', (req,res)=>{
-  const b=getBot(req);
+  const b=requireBot(req,res); if(!b) return;
   if(!b.state.ready) return res.status(400).json({ok:false,error:'Non connecté'});
   b.state.paused=false; b.state.limitReached=false; b.state.bannedAt=null;
   cancelSchedule(b.id); b.runQueue(otherBot(b)); res.json({ok:true});
 });
-app.post('/api/:account/pause', (req,res)=>{const b=getBot(req);b.state.paused=!b.state.paused;b.log(b.state.paused?'⏸️ Pause':'▶️ Reprise','warn');res.json({ok:true,paused:b.state.paused});});
-app.post('/api/:account/clear', (req,res)=>{getBot(req).clear();res.json({ok:true});});
-app.post('/api/:account/reset', (req,res)=>{getBot(req).reset();res.json({ok:true});});
+app.post('/api/:account/pause', (req,res)=>{ const b=requireBot(req,res); if(!b) return; b.state.paused=!b.state.paused; b.log(b.state.paused?'⏸️ Pause':'▶️ Reprise','warn'); res.json({ok:true,paused:b.state.paused}); });
+app.post('/api/:account/clear', (req,res)=>{ const b=requireBot(req,res); if(!b) return; b.clear(); res.json({ok:true}); });
+app.post('/api/:account/reset', (req,res)=>{ const b=requireBot(req,res); if(!b) return; b.reset(); res.json({ok:true}); });
 
 app.post('/api/:account/set-limit', (req,res)=>{
-  const b=getBot(req); const limit=parseInt(req.body.limit);
+  const b=requireBot(req,res); if(!b) return;
+  const limit=parseInt(req.body.limit);
   if(!limit||limit<1||limit>1000) return res.status(400).json({ok:false,error:'Limite invalide (1-1000)'});
   config.dailyLimit[b.id]=limit; saveConfig(); b.log(`⚙️ Limite modifiée → ${limit} msgs/24h`,'warn');
   res.json({ok:true,limit});
 });
 
 // FIX #6 : validation robuste de scheduledAt via parseScheduledAt().
-// Avant : new Date(scheduledAt).getTime() retournait NaN si la valeur était
-// invalide, ce qui rendait ms <= 0 toujours true et déclenchait l'erreur
-// "Heure dans le passé" de façon silencieuse et trompeuse.
-// Désormais : type vérifié, Date.parse() testé via isNaN(), message d'erreur
-// explicite avec le format attendu, et seuil minimum de 30 secondes dans le futur.
 app.post('/api/:account/schedule', (req,res)=>{
-  const b=getBot(req); const{scheduledAt}=req.body;
+  const b=requireBot(req,res); if(!b) return;
+  const{scheduledAt}=req.body;
   if(!scheduledAt) return res.status(400).json({ok:false,error:'scheduledAt requis'});
   const result=setSchedule(b,scheduledAt,otherBot(b));
   if(!result.ok) return res.status(400).json(result);
   res.json(result);
 });
-app.delete('/api/:account/schedule', (req,res)=>{cancelSchedule(getBot(req).id);res.json({ok:true});});
+app.delete('/api/:account/schedule', (req,res)=>{ const b=requireBot(req,res); if(!b) return; cancelSchedule(b.id); res.json({ok:true}); });
 
 app.post('/api/:account/test-message', async(req,res)=>{
   try {
-    const b=getBot(req); const{phone,message,link}=req.body;
+    const b=requireBot(req,res); if(!b) return;
+    const{phone,message,link}=req.body;
     if(!phone) return res.status(400).json({ok:false,error:'Numéro requis'});
     await b.sendTest(phone,message,link); res.json({ok:true});
   } catch(e){res.status(400).json({ok:false,error:e.message});}
@@ -681,7 +692,8 @@ app.get('/api/stats', (req,res)=>{
 });
 
 app.get('/api/:account/queue', (req,res)=>{
-  const bot=getBot(req); const{status,page=1,limit=50}=req.query;
+  const bot=requireBot(req,res); if(!bot) return;
+  const{status,page=1,limit=50}=req.query;
   let items=bot.state.queue;
   if(status==='replied') items=items.filter(c=>c.replied===true);
   else if(status) items=items.filter(c=>c.status===status);
@@ -690,7 +702,8 @@ app.get('/api/:account/queue', (req,res)=>{
 });
 
 app.get('/api/:account/export', (req,res)=>{
-  const bot=getBot(req); const{status}=req.query;
+  const bot=requireBot(req,res); if(!bot) return;
+  const{status}=req.query;
   let items=bot.state.queue;
   if(status==='replied') items=items.filter(c=>c.replied===true);
   else if(status) items=items.filter(c=>c.status===status);
@@ -703,6 +716,7 @@ app.get('/api/:account/export', (req,res)=>{
 
 // FIX #1 : fichier uploadé supprimé dans finally + guard req.file
 app.post('/api/:account/import', upload.single('file'), (req,res)=>{
+  const bot=requireBot(req,res); if(!bot) return;
   if (!req.file) return res.status(400).json({ok:false,error:'Fichier manquant'});
   let result;
   try {
@@ -711,7 +725,7 @@ app.post('/api/:account/import', upload.single('file'), (req,res)=>{
     const link=(req.body.link||'').trim();
     if(!message) return res.status(400).json({ok:false,error:'Message vide'});
     const force=JSON.parse(req.body.forceInclude||'[]');
-    result=getBot(req).importCSV(content,message,link,force);
+    result=bot.importCSV(content,message,link,force);
   } catch(e){
     return res.status(400).json({ok:false,error:e.message});
   } finally {
@@ -725,7 +739,8 @@ app.post('/api/:account/import', upload.single('file'), (req,res)=>{
 });
 
 app.delete('/api/:account/queue/:phone', (req,res)=>{
-  const removed=getBot(req).removeContact(req.params.phone);
+  const bot=requireBot(req,res); if(!bot) return;
+  const removed=bot.removeContact(req.params.phone);
   res.json({ok:true,removed});
 });
 
@@ -791,12 +806,14 @@ app.post('/api/config',(req,res)=>{
 });
 
 app.get('/api/:account/groups',async(req,res)=>{
-  const bot=getBot(req); if(!bot.state.ready) return res.json([]);
+  const bot=requireBot(req,res); if(!bot) return;
+  if(!bot.state.ready) return res.json([]);
   const chats=await bot.client.getChats();
   res.json(chats.filter(c=>c.isGroup).map(c=>({name:c.name,count:c.participants?.length||0})));
 });
 app.get('/api/:account/export-group/:name',async(req,res)=>{
-  const bot=getBot(req); if(!bot.state.ready) return res.status(400).json({ok:false,error:'Non connecté'});
+  const bot=requireBot(req,res); if(!bot) return;
+  if(!bot.state.ready) return res.status(400).json({ok:false,error:'Non connecté'});
   const chats=await bot.client.getChats(); const groupName=decodeURIComponent(req.params.name);
   const group=chats.find(c=>c.isGroup&&c.name===groupName);
   if(!group) return res.status(404).json({ok:false,error:'Groupe introuvable'});
