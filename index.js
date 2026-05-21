@@ -24,9 +24,10 @@ function saveBlacklist(list) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(BLACKLIST_FILE, JSON.stringify([...new Set(list)], null, 2));
 }
-function isBlacklisted(phone) {
+function isBlacklisted(phone, cachedList) {
   const clean = phone.replace(/\D/g,'');
-  return loadBlacklist().some(p => p.replace(/\D/g,'') === clean);
+  const list = cachedList || loadBlacklist();
+  return list.some(p => p.replace(/\D/g,'') === clean);
 }
 
 // ─── Historique global des contacts déjà envoyés ────────────────────────────
@@ -55,9 +56,9 @@ function addToSentHistory(phone, data) {
     saveSentHistory(hist);
   }
 }
-function isAlreadySent(phone) {
+function isAlreadySent(phone, cachedHist) {
   const clean = phone.replace(/\D/g,'');
-  const hist = loadSentHistory();
+  const hist = cachedHist || loadSentHistory();
   return hist[clean] || null;
 }
 function removeFromSentHistory(phone) {
@@ -507,8 +508,17 @@ class BotAccount {
     this._saveQueue();
   }
 
+  // FIX #5 : blacklist et sent-history chargés une seule fois avant la boucle
+  // Avant : isBlacklisted() et isAlreadySent() relisaient le fichier JSON du
+  // disque à chaque contact importé. Sur un CSV de milliers de lignes, cela
+  // provoquait des milliers d’accès disque inutiles et risquait de corrompre
+  // les fichiers en cas d’écriture concurrente.
   importCSV(content, defaultMessage, defaultLink, forceIncludeDuplicates = []) {
     const records = csv.parse(content, { columns: true, skip_empty_lines: true });
+    // Chargement unique en mémoire pour toute la durée de l'import
+    const blacklistCache = loadBlacklist();
+    const sentHistoryCache = loadSentHistory();
+
     let added=0, blacklisted=0, skippedQueue=0;
     const duplicates=[];
     for (const row of records) {
@@ -516,10 +526,12 @@ class BotAccount {
       if (!phone||phone.length<8) continue;
       const prenom=row.prenom||row.prénom||row.firstname||row.first_name||row.Prenom||row['Prénom']||'';
       const nom=row.nom||row.name||row.lastname||row.last_name||row.Nom||row['Nom']||'';
-      if (isBlacklisted(phone)) { blacklisted++; continue; }
+
+      // Utilise les caches en mémoire au lieu de relire le disque
+      if (isBlacklisted(phone, blacklistCache)) { blacklisted++; continue; }
       if (this.state.queue.find(c=>c.phone.replace(/\D/g,'')=== phone)) { skippedQueue++; continue; }
 
-      const histEntry=isAlreadySent(phone);
+      const histEntry=isAlreadySent(phone, sentHistoryCache);
       if (histEntry && !forceIncludeDuplicates.includes(phone)) {
         duplicates.push({ phone, prenom: prenom.trim(), nom: nom.trim(), sentAt: histEntry.sentAt, botId: histEntry.botId, message: histEntry.message });
         continue;
@@ -778,10 +790,6 @@ app.get('/api/:account/export-group/:name',async(req,res)=>{
 
 // Compat bot 1
 // FIX #4 : la route legacy /api/start ne vérifiait pas si le bot était connecté
-// avant de lancer runQueue, contrairement à la route /api/:account/start.
-// Sans ce check, appeler /api/start alors que le bot n'est pas prêt démarre
-// une boucle queue inutile qui échoue silencieusement sur chaque contact
-// (échec isRegisteredUser, sendMessage, etc.) et génère des erreurs en cascade.
 app.get('/api/status',(req,res)=>res.json(bots[1].getStatus()));
 app.post('/api/start',(req,res)=>{
   if(!bots[1].state.ready) return res.status(400).json({ok:false,error:'Non connecté'});
