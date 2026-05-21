@@ -881,9 +881,17 @@ const AVG = 82; // repli si l'API ne renvoie pas estimatedQueueSec
 
 function countOutboundMessagesClient(msg, link) {
   const text = (msg || '').trim();
-  const lnk = (link || '').trim();
-  if (!text && !lnk) return 0;
-  return 1;
+  const separateLink = !!(link && link.trim());
+  if (separateLink && text) return 2;
+  if (separateLink) return 1;
+  const m = text.match(/(https?:\/\/[^\s]+)/i);
+  if (m) {
+    const before = text.slice(0, m.index).trim();
+    const after = text.slice(m.index + m[1].length).trim();
+    const hasText = !!(before || after);
+    return hasText ? 2 : 1;
+  }
+  return text ? 1 : 0;
 }
 
 function queueEtaSeconds(r) {
@@ -1805,11 +1813,9 @@ function updatePreview() {
   const waEl = document.getElementById('import-msg-wa-count');
   if (waEl) {
     const contactNote = isQuotaAsContacts() && waCount >= 2 ? ' → 1 contact sur le quota' : '';
-    waEl.innerHTML = waCount >= 2
-      ? `<span class="badge badge-yellow">2 messages WhatsApp par contact (texte + lien)</span>${contactNote}`
-      : waCount === 1
-        ? '<span class="badge badge-blue">1 message WhatsApp par contact</span>'
-        : '';
+    waEl.innerHTML = waCount >= 1
+      ? '<span class="badge badge-blue">1 message WhatsApp par contact (texte + lien combinés)</span>'
+      : '';
   }
   const p = document.getElementById('msg-preview');
   const preview = msg.replace(/\{prénom\}/gi,'Marie').replace(/\{nom\}/gi,'Dupont').replace(/\{prenom\}/gi,'Marie');
