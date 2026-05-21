@@ -36,6 +36,18 @@ const WA_WEB_VERSION = process.env.WA_WEB_VERSION || '2.3000.1038602566-alpha';
 const WA_WEB_CACHE_REMOTE = process.env.WA_WEB_CACHE_REMOTE || 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/{version}.html';
 const READY_PROBE_DELAY_MS = parseInt(process.env.READY_PROBE_DELAY_MS || '20000', 10);
 const MSG_ACK_TIMEOUT_MS = parseInt(process.env.MSG_ACK_TIMEOUT_MS || '25000', 10);
+const MANUAL_SEARCH_FLOW = process.env.MANUAL_SEARCH_FLOW !== '0';
+const COLD_OPENER_DELAY_MS = parseInt(process.env.COLD_OPENER_DELAY_MS || '8000', 10);
+
+function getColdOpenerText() {
+  if (process.env.COLD_OPENER_MESSAGE === '0') return '';
+  return (process.env.COLD_OPENER_MESSAGE || 'Hey').trim();
+}
+
+function useAckColdSoft() {
+  return process.env.ACK_COLD_SOFT !== '0';
+}
+
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
@@ -535,6 +547,52 @@ async function prepareOutboundChat(client, phoneDigits, logger) {
         const cusWid = WidFactory.createWid(phone + '@c.us');
         let chat = Collections.Chat.get(cusWid);
         let synced = false;
+        let manualOpened = false;
+
+        // Flux manuel : ouvrir le chat comme "recherche → Discuter" (plusieurs APIs WA Web)
+        const tryOpenManual = async () => {
+          try {
+            const Cmd = window.require('WAWebCmd');
+            if (Cmd?.openChatAt) {
+              await Cmd.openChatAt(cusWid);
+              chat = Collections.Chat.get(cusWid);
+              if (chat) return true;
+            }
+          } catch (_) {}
+          try {
+            const ChatSearch = window.require('WAWebChatSearch');
+            if (ChatSearch?.searchChat) {
+              const hit = await ChatSearch.searchChat(phone, { remote: true }).catch(() => null);
+              if (hit?.chat) { chat = hit.chat; return true; }
+            }
+            if (ChatSearch?.query) {
+              await ChatSearch.query(phone);
+              const hit2 = ChatSearch?.getResultChat?.() || ChatSearch?.getChat?.();
+              if (hit2) { chat = hit2; return true; }
+            }
+          } catch (_) {}
+          try {
+            const ChatAction = window.require('WAWebChatAction');
+            if (ChatAction?.openChatBottom) {
+              await ChatAction.openChatBottom(cusWid);
+              chat = Collections.Chat.get(cusWid);
+              if (chat) return true;
+            }
+          } catch (_) {}
+          try {
+            const Sidebar = window.require('WAWebSidebarAction');
+            if (Sidebar?.openChat) {
+              await Sidebar.openChat(cusWid);
+              chat = Collections.Chat.get(cusWid);
+              if (chat) return true;
+            }
+          } catch (_) {}
+          return false;
+        };
+
+        if (!chat) {
+          manualOpened = await tryOpenManual();
+        }
 
         if (!chat) {
           chat = (await FindChat.findOrCreateLatestChat(cusWid).catch(() => null))?.chat;
@@ -577,6 +635,7 @@ async function prepareOutboundChat(client, phoneDigits, logger) {
           ok: true,
           chatId: serialized,
           synced,
+          manualOpened,
           hasWaHistory,
           isMyContact,
           isCold: !hasWaHistory && !isMyContact
@@ -593,6 +652,7 @@ async function prepareOutboundChat(client, phoneDigits, logger) {
     chatId = prep.chatId || cusId;
     isColdContact = !!prep.isCold;
     isKnownContact = !!(prep.isMyContact || prep.hasWaHistory);
+    if (prep.manualOpened && logger) logger(`🔍 Chat ouvert (flux recherche / Discuter) pour +${phoneDigits}`, 'info');
     if (prep.synced && logger) logger(`🔗 Contact synchronisé WhatsApp (LID) pour +${phoneDigits}`, 'info');
     if (isKnownContact && logger) logger(`💬 Historique ou contact connu pour +${phoneDigits}`, 'info');
     if (isColdContact && logger) {
@@ -694,7 +754,7 @@ async function deliverOutboundMessage(client, sendChatId, text, label, chatObj, 
   }
 }
 
-async function sendAndVerify(client, chatId, text, label, logger, chatForTyping = null, phoneDigits = null) {
+async function sendAndVerify(client, chatId, text, label, logger, chatForTyping = null, phoneDigits = null, opts = {}) {
   let sendChatId = chatId;
   const useChatObject = !!chatForTyping;
   if (!useChatObject && (sendChatId.includes('@lid') || !sendChatId.includes('@'))) {
@@ -739,7 +799,16 @@ async function sendAndVerify(client, chatId, text, label, logger, chatForTyping 
     ackLevel = await waitForMessageAck(client, msgId, label);
     if (logger) logger(`✔️ ACK ${label} (niveau ${ackLevel}) · id: ${msgId.substring(0, 24)}...`, 'info');
   } catch (ackErr) {
-    if (/rejeté|ACK_ERROR/i.test(ackErr.message)) throw new Error(ackErr.message);
+    if (/rejeté|ACK_ERROR/i.test(ackErr.message)) {
+      if (opts.ackSoft && verifyChat) {
+        try {
+          await verifyMessageInChat(verifyChat, text, msgId, label, { softFail: false, logger });
+          if (logger) logger(`⚠️ ACK_ERROR mais message visible (${label}) — envoi accepté (comme manuel)`, 'warn');
+          return { id: msgId, verified: true, ackSoftOk: true };
+        } catch (_) {}
+      }
+      throw new Error(ackErr.message);
+    }
     if (logger) logger(`⚠️ ${ackErr.message} — vérif historique...`, 'warn');
   }
   const ackOk = ackLevel !== null && ackLevel >= MessageAck.ACK_SERVER;
@@ -1144,7 +1213,7 @@ class BotAccount {
   async _delaySession() { const ms=rand(config.sessionPauseMin,config.sessionPauseMax)*1000; this.log(`☕ Pause session : ${(ms/60000).toFixed(0)}min`,'warn'); await sleep(ms); }
   async _typing(chat)   { try { await chat.sendStateTyping(); await sleep(rand(config.typingMin,config.typingMax)); await chat.clearState(); } catch(e) {} }
 
-  async _sendMessage(chatId, rawMsg, link, prefetchedChat = null) {
+  async _sendMessage(chatId, rawMsg, link, prefetchedChat = null, opts = {}) {
     const ids  = [];
     let chat = prefetchedChat;
     if (!chat) {
@@ -1152,9 +1221,10 @@ class BotAccount {
         this.log(`⚠️ getChatById pour typing : ${e.message}`, 'warn');
       }
     }
+    const ackSoft = !!(opts.coldContact && useAckColdSoft());
     const doSend = async (text, label, useTypingChat) => {
       const pn = chatId.split('@')[0].replace(/\D/g, '');
-      const result = await sendAndVerify(this.client, chatId, text, label, this.log.bind(this), useTypingChat, pn);
+      const result = await sendAndVerify(this.client, chatId, text, label, this.log.bind(this), useTypingChat, pn, { ackSoft });
       ids.push(result.id);
       return result.id;
     };
@@ -1217,7 +1287,9 @@ class BotAccount {
     if (combined && linkBase) {
       this.log('📨 Envoi en 1 message (texte + lien combinés)', 'info');
     }
-    const msgCount = countOutboundMessages(rawMsg, personalizedLink);
+    let msgCount = countOutboundMessages(rawMsg, personalizedLink);
+    const openerForQuota = isColdContact ? getColdOpenerText() : '';
+    if (openerForQuota) msgCount += 1;
     if (msgCount === 0) throw new Error('Message vide');
     if (msgCount > this._messagesAvailable()) {
       throw new Error(`Quota insuffisant : ${msgCount} message(s) requis, ${this._messagesAvailable()} restant(s) sur ${this.dailyLimit}`);
@@ -1225,10 +1297,28 @@ class BotAccount {
     if (!(await this._waitForHourlyCapacity(msgCount))) {
       throw new Error('Envoi annulé : limite horaire');
     }
+    const opener = isColdContact ? getColdOpenerText() : '';
+    if (opener) {
+      this.log(`👋 Étape 1 (comme manuel) : "${opener}" puis message campagne`, 'info');
+      await sleep(rand(400, 1200));
+    }
     this._recordFirstSend();
-    const result = await this._sendMessage(chatId, rawMsg, personalizedLink, prefetchedChat);
+    const sendOpts = { coldContact: isColdContact };
+    let result;
+    if (opener) {
+      const openerResult = await this._sendMessage(chatId, opener, '', prefetchedChat, sendOpts);
+      await sleep(COLD_OPENER_DELAY_MS);
+      const mainResult = await this._sendMessage(chatId, rawMsg, personalizedLink, prefetchedChat, sendOpts);
+      result = {
+        messageCount: openerResult.messageCount + mainResult.messageCount,
+        ids: [...(openerResult.ids || []), ...(mainResult.ids || [])],
+        lastId: mainResult.lastId
+      };
+    } else {
+      result = await this._sendMessage(chatId, rawMsg, personalizedLink, prefetchedChat, sendOpts);
+    }
     this.state.sessionHealthy = true;
-    return { chatId, number, rawMsg, personalizedLink, msgCount, result, combined };
+    return { chatId, number, rawMsg, personalizedLink, msgCount, result, combined, openerUsed: !!opener };
   }
 
   async sendTest(phone, message, link) {
@@ -1389,7 +1479,7 @@ class BotAccount {
             this.log(`⛔ Refus WhatsApp pour +${number} : ${err.message} — contact ignoré (${this._consecutiveRejects}/${maxRejects} consécutifs)`, 'warn');
             this._saveQueue();
             if (this._consecutiveRejects >= maxRejects) {
-              this.log(`🛑 ${maxRejects} refus consécutifs — pause queue (compte peut être limité). Reprenez plus tard ou Compte 2.`, 'error');
+              this.log(`🛑 ${maxRejects} refus consécutifs — pause queue (échec technique ou anti-spam ciblé — pas forcément un ban complet. Testez un envoi manuel sur ce numéro.`, 'error');
               this.state.paused = true;
               this.state.running = false;
               break;
@@ -1541,7 +1631,7 @@ app.get('/api/health', (req, res) => {
     ok: true,
     version: APP_VERSION,
     commit: BUILD_COMMIT,
-    features: { resetAuth: true, ghostDetection: true, messageAck: true, combinedLinkMessage: !useSplitLinkMessages(), coldContactSync: true },
+    features: { resetAuth: true, ghostDetection: true, messageAck: true, combinedLinkMessage: !useSplitLinkMessages(), coldContactSync: true, manualSearchFlow: true, coldOpener: true, ackColdSoft: true },
     resetAuthOnStart: [...RESET_AUTH_ON_START],
     uptimeSec: Math.round(process.uptime()),
   });
