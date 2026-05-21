@@ -463,8 +463,56 @@ function assertDistinctMessageIds(ids) {
   }
 }
 
-async function waitForMessageAck(client, msgId, label) {
+function minAckRequired() {
+  return REQUIRE_ACK_DEVICE ? MessageAck.ACK_DEVICE : MessageAck.ACK_SERVER;
+}
+
+function resolveAckLevel(ack, label) {
+  if (ack === undefined || ack === null) return null;
+  if (ack === MessageAck.ACK_ERROR) {
+    throw new Error(`WhatsApp a rejeté le message (${label}) — compte peut-être restreint / signalé`);
+  }
+  return ack >= minAckRequired() ? ack : null;
+}
+
+async function getMessageAckFromStore(client, msgId) {
+  const page = client.pupPage;
+  if (!page || !msgId) return null;
+  try {
+    const ack = await withTimeout(
+      page.evaluate(async (id) => {
+        try {
+          const Coll = window.require('WAWebCollections');
+          let msg = Coll?.Msg?.get?.(id);
+          if (!msg && Coll?.Msg?.getMessagesById) {
+            const batch = await Coll.Msg.getMessagesById([id]).catch(() => null);
+            msg = batch?.messages?.[0];
+          }
+          if (!msg) return null;
+          return typeof msg.ack === 'number' ? msg.ack : null;
+        } catch (_) {
+          return null;
+        }
+      }, msgId),
+      6000,
+      'getMessageAckFromStore'
+    );
+    return typeof ack === 'number' ? ack : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function waitForMessageAck(client, msgId, label, preAck = null) {
   if (!msgId || msgId === 'verified-no-id') return MessageAck.ACK_SERVER;
+
+  let level = resolveAckLevel(preAck, label);
+  if (level !== null) return level;
+
+  const storeAck = await getMessageAckFromStore(client, msgId);
+  level = resolveAckLevel(storeAck, label);
+  if (level !== null) return level;
+
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       client.removeListener('message_ack', onAck);
@@ -478,8 +526,7 @@ async function waitForMessageAck(client, msgId, label) {
         client.removeListener('message_ack', onAck);
         reject(new Error(`WhatsApp a rejeté le message (${label}) — compte peut-être restreint / signalé`));
       }
-      const minAck = REQUIRE_ACK_DEVICE ? MessageAck.ACK_DEVICE : MessageAck.ACK_SERVER;
-      if (ack >= minAck) {
+      if (ack >= minAckRequired()) {
         clearTimeout(timer);
         client.removeListener('message_ack', onAck);
         resolve(ack);
@@ -640,9 +687,10 @@ async function sendTextViaWhatsAppStore(client, phoneDigits, text, logger, label
         const sent = await window.WWebJS.sendMessage(chat, msg, { waitUntilMsgSent: true });
         const id =
           sent?.id?._serialized ||
-          sent?.id?._serialized ||
-          (typeof sent?._serialized === 'string' ? sent._serialized : null);
-        return { ok: !!id, id, via: 'WWebJS.sendMessage' };
+          sent?.id?.id ||
+          (typeof sent?.id === 'string' ? sent.id : null);
+        const ack = typeof sent?.ack === 'number' ? sent.ack : null;
+        return { ok: !!id, id, ack, via: 'WWebJS.sendMessage' };
       } catch (e) {
         return { ok: false, err: e.message || String(e) };
       }
@@ -655,8 +703,11 @@ async function sendTextViaWhatsAppStore(client, phoneDigits, text, logger, label
     if (logger) logger(`⚠️ WWebJS.sendMessage (${label}) : ${result?.err || 'pas d\'id'}`, 'warn');
     return null;
   }
-  if (logger) logger(`📤 Envoyé via ${result.via} (${label})`, 'info');
-  return { id: result.id, viaStore: true };
+  if (logger) {
+    const ackNote = typeof result.ack === 'number' ? ` · ack=${result.ack}` : '';
+    logger(`📤 Envoyé via ${result.via} (${label})${ackNote}`, 'info');
+  }
+  return { id: result.id, viaStore: true, ack: result.ack ?? null };
 }
 
 
@@ -1055,7 +1106,7 @@ async function sendSingleOutbound(client, chatId, text, label, logger, prefetche
     const sent = await sendTextViaWhatsAppStore(client, pn, text, logger, stepLabel);
     if (!sent?.id) return null;
     try {
-      const ack = await waitForMessageAck(client, sent.id, stepLabel);
+      const ack = await waitForMessageAck(client, sent.id, stepLabel, sent.ack);
       const chat = await withTimeout(client.getChatById(cusId), 12000, 'verify store send');
       await verifyMessageInChat(chat, text, sent.id, stepLabel, {
         strict: !isHeyLikeLabel(stepLabel),
@@ -1065,6 +1116,18 @@ async function sendSingleOutbound(client, chatId, text, label, logger, prefetche
       if (logger) logger(`✔️ ACK ${stepLabel} via module WA (niveau ${ack})`, 'success');
       return { id: sent.id, verified: true, viaStore: true };
     } catch (e) {
+      if (/Timeout accusé/i.test(e.message)) {
+        try {
+          const chat = await withTimeout(client.getChatById(cusId), 12000, 'verify store timeout');
+          await verifyMessageInChat(chat, text, sent.id, stepLabel, {
+            strict: !isHeyLikeLabel(stepLabel),
+            maxAgeMs: 90000,
+            logger
+          });
+          if (logger) logger(`✔️ ${stepLabel} confirmé dans le chat (ACK déjà passé avant écoute)`, 'success');
+          return { id: sent.id, verified: true, viaStore: true };
+        } catch (_) {}
+      }
       if (logger) logger(`❌ Module WA (${stepLabel}) : ${e.message}`, 'error');
       return null;
     }
@@ -1683,6 +1746,7 @@ class BotAccount {
       const openerResult = await this._sendMessage(sendId, openerText, '', prefetchedChat, {
         ...sendOpts, manualOpener: true, forceUi: true
       });
+      this.log(`✅ Hey livré (${openerResult.messageCount} msg)`, 'success');
       await sleep(COLD_OPENER_DELAY_MS);
       if (splitRoute) {
         const textOnly = personalizeMessage((message ?? contact.message ?? '').trim() || process.env.DEFAULT_MESSAGE || '', contact);
