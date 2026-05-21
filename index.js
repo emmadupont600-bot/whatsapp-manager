@@ -36,6 +36,23 @@ function cleanUploadsDir() {
 cleanUploadsDir();
 setInterval(cleanUploadsDir, MAX_AGE_MS);
 
+// ─── FIX #8 : Middleware d'authentification par token Bearer ─────────────────
+// Définir AUTH_TOKEN dans les variables d'environnement pour activer la
+// protection. Si la variable n'est pas définie, les routes sont publiques
+// (comportement rétrocompatible en développement local).
+const AUTH_TOKEN = process.env.AUTH_TOKEN || '';
+function authMiddleware(req, res, next) {
+  if (!AUTH_TOKEN) return next(); // pas de token configuré → accès libre
+  const header = req.headers['authorization'] || '';
+  const token  = header.startsWith('Bearer ') ? header.slice(7) : '';
+  if (token !== AUTH_TOKEN) {
+    return res.status(401).json({ ok: false, error: 'Non autorisé. Token Bearer requis.' });
+  }
+  next();
+}
+// Protège toutes les routes /api/*
+app.use('/api', authMiddleware);
+
 // ─── Blacklist ───────────────────────────────────────────────────────────────
 const BLACKLIST_FILE = path.join(__dirname, 'data', 'blacklist.json');
 function loadBlacklist() {
@@ -96,6 +113,10 @@ function cancelSchedule(accountId) {
   if (schedules[accountId]) { clearTimeout(schedules[accountId].timerId); delete schedules[accountId]; }
 }
 
+// FIX #6 : validation stricte de la date planifiée.
+// Avant : n'importe quelle valeur était acceptée. new Date(invalid) retournait
+// NaN → ms <= 0 → setTimeout(fn, NaN) → déclenchement immédiat silencieux.
+// Après : vérification isNaN(ts) + délai minimum de 30 secondes.
 function parseScheduledAt(scheduledAt) {
   if (!scheduledAt || typeof scheduledAt !== 'string') {
     return { ok: false, error: 'scheduledAt doit être une chaîne de caractères' };
@@ -168,7 +189,11 @@ function saveLogs(id, entries) {
   }
 }
 
-// ─── Config par défaut ───────────────────────────────────────────────────────
+// ─── FIX #10 : dailyLimit dynamique via Proxy ────────────────────────────────
+// Avant : config.dailyLimit = { 1: ..., 2: ... } était hardcodé et ne
+// s'adaptait pas à l'ajout d'un nouveau bot.
+// Après : Proxy sur un objet d'overrides — tout ID non encore surchargé
+// retourne DEFAULT_DAILY_LIMIT, évitant undefined pour les nouveaux bots.
 const DEFAULT_DAILY_LIMIT = parseInt(process.env.DAILY_LIMIT || '300');
 const _dailyLimitOverrides = {};
 const dailyLimitMap = new Proxy(_dailyLimitOverrides, {
@@ -256,6 +281,9 @@ class BotAccount {
     this.retryCount = 0;
     this._resumeTimer   = null;
     this._logFlushTimer = null;
+    // FIX #2 : flag _starting pour éviter la race condition dans runQueue().
+    // running seul ne suffit pas car entre deux await, une seconde invocation
+    // peut passer la vérification avant que running soit mis à true.
     this._starting  = false;
     this.state = {
       qr: null, ready: false, running: false, paused: false,
@@ -473,26 +501,12 @@ class BotAccount {
   async _delaySession() { const ms=rand(config.sessionPauseMin,config.sessionPauseMax)*1000; this.log(`☕ Pause session : ${(ms/60000).toFixed(0)}min`,'warn'); await sleep(ms); }
   async _typing(chat) { try { await chat.sendStateTyping(); await sleep(rand(config.typingMin,config.typingMax)); await chat.clearState(); } catch(e) {} }
 
-  // ─── FIX : _sendMessage robuste ──────────────────────────────────────────
-  // AVANT : sendMessage() était appelé sans vérifier son retour. La lib
-  // whatsapp-web.js ne lève pas d'exception si la session est dégradée —
-  // elle retourne simplement un objet Message vide ou null, ce qui faisait
-  // afficher "✅ Envoyé" dans les logs alors que le message n'était jamais
-  // arrivé côté WhatsApp.
-  //
-  // APRÈS :
-  //  1. La valeur de retour de sendMessage() est capturée dans `sent`.
-  //  2. Si `sent` est falsy ou n'a pas de `id._serialized`, une vraie Error
-  //     est levée → runQueue() la catch et marque le contact 'failed' au
-  //     lieu de 'done', ce qui empêche le faux "✅".
-  //  3. Cas url-seule : si splitMessageAndLink() trouve une URL mais que
-  //     parts.text est vide (message = URL pure), on envoie l'URL telle
-  //     quelle en un seul sendMessage() plutôt qu'une chaîne vide + URL.
-  //  4. L'id WA du message est retourné pour être loggé dans runQueue().
+  // FIX : _sendMessage vérifie l'accusé de réception WA.
+  // sendMessage() peut retourner null/undefined si la session est dégradée
+  // sans lever d'exception, ce qui faisait afficher un faux "✅ Envoyé".
   async _sendMessage(chatId, rawMsg, link) {
     const chat = await this.client.getChatById(chatId);
 
-    // Vérifie qu'un Message retourné par sendMessage() est valide.
     const assertSent = (msg, label) => {
       if (!msg || !msg.id || !msg.id._serialized) {
         throw new Error(`sendMessage() n'a pas retourné d'accusé de réception WhatsApp (${label}). Session peut-être expirée.`);
@@ -501,7 +515,6 @@ class BotAccount {
     };
 
     if (link && link.trim()) {
-      // Cas nominal : texte + lien fournis séparément via le champ "link"
       await this._typing(chat);
       const sentText = await this.client.sendMessage(chatId, rawMsg.trim());
       assertSent(sentText, 'texte');
@@ -509,34 +522,27 @@ class BotAccount {
       this.log(`⏱ Délai avant lien : ${(delay/1000).toFixed(1)}s`, 'info');
       await sleep(delay);
       const sentLink = await this.client.sendMessage(chatId, link.trim());
-      assertSent(sentLink, 'lien');
-      return assertSent(sentLink, 'lien'); // retourne l'id du dernier msg
+      return assertSent(sentLink, 'lien');
     }
 
     const parts = splitMessageAndLink(rawMsg);
     if (parts) {
       if (parts.text) {
-        // Lien détecté à l'intérieur du texte : envoie texte puis URL séparément
         await this._typing(chat);
         const sentText = await this.client.sendMessage(chatId, parts.text);
         assertSent(sentText, 'texte');
         const delay = rand(config.linkDelayMin, config.linkDelayMax);
         await sleep(delay);
         const sentLink = await this.client.sendMessage(chatId, parts.url);
-        assertSent(sentLink, 'lien');
         return assertSent(sentLink, 'lien');
       } else {
-        // FIX : message = URL pure (pas de texte autour) → envoie l'URL seule
-        // Avant : on envoyait '' (chaîne vide) puis l'URL → le 1er message
-        // était vide et pouvait être refusé silencieusement par WA.
+        // Message = URL pure : envoie l'URL seule sans chaîne vide en premier
         await this._typing(chat);
         const sentLink = await this.client.sendMessage(chatId, parts.url);
-        assertSent(sentLink, 'url-seule');
         return assertSent(sentLink, 'url-seule');
       }
     }
 
-    // Cas simple : texte sans lien
     await this._typing(chat);
     const sent = await this.client.sendMessage(chatId, rawMsg);
     return assertSent(sent, 'texte-simple');
@@ -550,11 +556,13 @@ class BotAccount {
     const fakeContact={phone:number,prenom:'Test',nom:'Test'};
     const rawMsg=personalizeMessage(message||'Message de test 👋',fakeContact);
     const rawLink=personalizeMessage(link||'',fakeContact);
-    // _sendMessage() lève une vraie Error si l'envoi échoue silencieusement
     const msgId = await this._sendMessage(chatId,rawMsg,rawLink);
     this.log(`🧪 Message de test envoyé à +${number} [id: ${msgId}]`,'success');
   }
 
+  // FIX #2 : protection contre la race condition.
+  // _starting est mis à true de façon synchrone avant le 1er await,
+  // ce qui empêche une seconde invocation de passer la garde.
   async runQueue(relayBot) {
     if (this.state.running || this._starting) return;
     this._starting = true;
@@ -622,12 +630,9 @@ class BotAccount {
         const personalizedLink=personalizeMessage(link,contact);
 
         this._recordFirstSend();
-        // _sendMessage() lève maintenant une vraie Error si WA ne confirme
-        // pas la réception → le catch ci-dessous marquera 'failed' au lieu
-        // de laisser passer un faux '✅ Envoyé'
         const msgId = await this._sendMessage(chatId,rawMsg,personalizedLink);
         contact.status='done'; contact.sentAt=new Date().toISOString();
-        contact.waMessageId = msgId; // stocke l'id WA pour audit
+        contact.waMessageId = msgId;
         this.state.stats.sent++; this.state.sessionCount++; this.state.dailySent++;
         this.log(`✅ Envoyé à +${number}${contact.prenom?' ('+contact.prenom+')':''}${link?' 🔗':''} [${this.state.dailySent}/${this.dailyLimit}] id:${msgId}`,'success');
 
@@ -656,10 +661,13 @@ class BotAccount {
     this._saveQueue();
   }
 
+  // FIX #5 : blacklist et sentHistory chargés UNE SEULE FOIS avant la boucle.
+  // Avant : loadBlacklist() et loadSentHistory() étaient appelés à chaque
+  // itération → O(n) lectures disque pour n contacts, risque de corruption.
   importCSV(content, defaultMessage, defaultLink, forceIncludeDuplicates = []) {
     const records = csv.parse(content, { columns: true, skip_empty_lines: true });
-    const blacklistCache = loadBlacklist();
-    const sentHistoryCache = loadSentHistory();
+    const blacklistCache    = loadBlacklist();      // chargé une seule fois
+    const sentHistoryCache  = loadSentHistory();    // chargé une seule fois
 
     let added=0, blacklisted=0, skippedQueue=0;
     const duplicates=[];
@@ -754,6 +762,10 @@ class BotAccount {
 // ─── Deux comptes ─────────────────────────────────────────────────────────────
 const bots={1:new BotAccount(1),2:new BotAccount(2)};
 
+// FIX #7 : getBot() retourne null pour tout ID invalide ou inconnu.
+// Avant : retournait bots[1] en fallback silencieux → un client avec
+// account=3 opérait sur le bot 1 sans avertissement.
+// Après : requireBot() répond 404 JSON avec la liste des comptes valides.
 function getBot(req) {
   const id = parseInt(req.params.account || req.query.account || '');
   return (!isNaN(id) && bots[id]) ? bots[id] : null;
@@ -861,8 +873,12 @@ app.get('/api/:account/export', (req,res)=>{
   res.send(stringify(rows,{header:true}));
 });
 
+// FIX #1 + #3 : req.file vérifié avant usage, unlinkSync dans finally.
+// Avant : req.file.path crashait si multer ne recevait pas de fichier.
+// Avant : si importCSV() levait une exception, le fichier restait sur le disque.
 app.post('/api/:account/import', upload.single('file'), (req,res)=>{
   const bot=requireBot(req,res); if(!bot) return;
+  // FIX #3 : vérification explicite de req.file
   if (!req.file) return res.status(400).json({ok:false,error:'Fichier manquant'});
   let result;
   try {
@@ -875,6 +891,7 @@ app.post('/api/:account/import', upload.single('file'), (req,res)=>{
   } catch(e){
     return res.status(400).json({ok:false,error:e.message});
   } finally {
+    // FIX #1 : suppression garantie même en cas d'erreur
     try { fs.unlinkSync(req.file.path); } catch(_) {}
   }
   if(result.duplicates.length>0&&!(JSON.parse(req.body.forceInclude||'[]').length>0)) {
@@ -922,7 +939,9 @@ app.post('/api/blacklist/remove', (req,res)=>{
   saveBlacklist(list); res.json({ok:true,total:list.length});
 });
 
+// FIX #1 + #3 : même correction que /api/:account/import
 app.post('/api/blacklist/import', upload.single('file'), (req,res)=>{
+  // FIX #3 : vérification explicite de req.file
   if (!req.file) return res.status(400).json({ok:false,error:'Fichier manquant'});
   let added=0, total=0;
   try {
@@ -938,6 +957,7 @@ app.post('/api/blacklist/import', upload.single('file'), (req,res)=>{
   } catch(e){
     return res.status(400).json({ok:false,error:e.message});
   } finally {
+    // FIX #1 : suppression garantie même en cas d'erreur
     try { fs.unlinkSync(req.file.path); } catch(_) {}
   }
   res.json({ok:true,added,total});
@@ -975,10 +995,13 @@ app.get('/api/:account/export-group/:name',async(req,res)=>{
   res.send(stringify(rows,{header:true}));
 });
 
+// FIX #4 : route legacy /api/start vérifie state.ready et reset limitReached,
+// comme le fait la route paramétrée /api/:account/start.
+// Avant : appelait runQueue() sans vérifier la connexion ni reset limitReached.
 app.get('/api/status',(req,res)=>res.json(bots[1].getStatus()));
 app.post('/api/start',(req,res)=>{
   if(!bots[1].state.ready) return res.status(400).json({ok:false,error:'Non connecté'});
-  bots[1].state.paused=false; bots[1].state.bannedAt=null;
+  bots[1].state.paused=false; bots[1].state.limitReached=false; bots[1].state.bannedAt=null;
   bots[1].runQueue(bots[2]); res.json({ok:true});
 });
 app.post('/api/pause',(req,res)=>{bots[1].state.paused=!bots[1].state.paused;res.json({ok:true});});
