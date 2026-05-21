@@ -625,101 +625,40 @@ async function sendTextViaWhatsAppStore(client, phoneDigits, text, logger, label
   if (!page || process.env.STORE_SEND === '0') return null;
   const phone = String(phoneDigits).replace(/\D/g, '');
   const body = (text || '').trim();
+  const cusChatId = phoneToCusChatId(phone);
   if (!body) return null;
 
   const result = await withTimeout(
-    page.evaluate(async (ph, msg) => {
-      const out = { ok: false, err: null, id: null, via: null, tries: [] };
+    page.evaluate(async (chatId, msg) => {
       try {
-        const WidFactory = window.require('WAWebWidFactory');
-        const FindChat = window.require('WAWebFindChatAction');
-        const cusWid = WidFactory.createWid(ph + '@c.us');
-        let chat = (await FindChat.findOrCreateLatestChat(cusWid).catch(() => null))?.chat;
-        if (!chat) {
-          out.err = 'no_chat';
-          return out;
+        if (!window.WWebJS?.sendMessage) {
+          return { ok: false, err: 'wwebjs_not_injected' };
         }
-        try {
-          const Open = window.require('WAWebOpenChatAction') || window.require('WAWebChatAction');
-          if (Open?.openChatBottom) await Open.openChatBottom(chat);
-        } catch (_) {}
+        const chat = await window.WWebJS.getChat(chatId, { getAsModel: false });
+        if (!chat) return { ok: false, err: 'no_chat' };
 
-        const attempt = async (name, fn) => {
-          try {
-            const m = await fn();
-            const id = m?.id?._serialized || m?.id?.id || (typeof m?.id === 'string' ? m.id : null);
-            out.tries.push({ name, id: id || null });
-            if (id) return { name, id };
-          } catch (e) {
-            out.tries.push({ name, err: e.message || String(e) });
-          }
-          return null;
-        };
-
-        const SendAction = window.require('WAWebSendMsgChatAction');
-        if (SendAction) {
-          let r = await attempt('sendTextMsgToChat', () => SendAction.sendTextMsgToChat(chat, msg, {}));
-          if (!r && SendAction.sendMsg) {
-            r = await attempt('sendMsg', () => SendAction.sendMsg(chat, msg, {}));
-          }
-          if (r) { out.ok = true; out.via = r.name; out.id = r.id; return out; }
-        }
-
-        const AddSend = window.require('WAWebAddAndSendMsgToChat');
-        if (AddSend?.addAndSendMsgToChat) {
-          const r = await attempt('addAndSendMsgToChat', () =>
-            AddSend.addAndSendMsgToChat(chat, { body: msg, type: 'chat' }, {})
-          );
-          if (r) { out.ok = true; out.via = r.name; out.id = r.id; return out; }
-        }
-
-        const Front = window.require('WAWebFrontendMsgSendActions');
-        if (Front?.sendTextMsgToChat) {
-          const r = await attempt('frontendSend', () => Front.sendTextMsgToChat(chat, msg));
-          if (r) { out.ok = true; out.via = r.name; out.id = r.id; return out; }
-        }
-
-        if (typeof chat.sendMessage === 'function') {
-          const r = await attempt('chat.sendMessage', () => chat.sendMessage(msg));
-          if (r) { out.ok = true; out.via = r.name; out.id = r.id; return out; }
-        }
-
-        try {
-          const SendMessage = window.require('WAWebSendMessage');
-          if (SendMessage?.sendTextMsgToChat) {
-            const r = await attempt('WAWebSendMessage', () => SendMessage.sendTextMsgToChat(chat, msg));
-            if (r) { out.ok = true; out.via = r.name; out.id = r.id; return out; }
-          }
-        } catch (_) {}
-
-        try {
-          const Send2 = window.require('WAWebSendMsgChatAction').SendMessage;
-          if (Send2?.sendTextMsgToChat) {
-            const r = await attempt('SendMessage.sendTextMsgToChat', () => Send2.sendTextMsgToChat(chat, msg));
-            if (r) { out.ok = true; out.via = r.name; out.id = r.id; return out; }
-          }
-        } catch (_) {}
-
-        out.err = 'no_send_module';
-        out.triesDetail = out.tries.slice(0, 8);
-        return out;
+        const sent = await window.WWebJS.sendMessage(chat, msg, { waitUntilMsgSent: true });
+        const id =
+          sent?.id?._serialized ||
+          sent?.id?._serialized ||
+          (typeof sent?._serialized === 'string' ? sent._serialized : null);
+        return { ok: !!id, id, via: 'WWebJS.sendMessage' };
       } catch (e) {
-        out.err = e.message || String(e);
-        return out;
+        return { ok: false, err: e.message || String(e) };
       }
-    }, phone, body),
-    35000,
-    'sendTextViaWhatsAppStore'
+    }, cusChatId, body),
+    45000,
+    'WWebJS.sendMessage'
   );
 
   if (!result?.ok || !result.id) {
-    const detail = result?.triesDetail ? ` — ${JSON.stringify(result.triesDetail)}` : '';
-    if (logger) logger(`⚠️ Module WA (${label}) : ${result?.err || 'pas d\'id'}${detail}`, 'warn');
+    if (logger) logger(`⚠️ WWebJS.sendMessage (${label}) : ${result?.err || 'pas d\'id'}`, 'warn');
     return null;
   }
-  if (logger) logger(`📤 Message via ${result.via} (${label})`, 'info');
+  if (logger) logger(`📤 Envoyé via ${result.via} (${label})`, 'info');
   return { id: result.id, viaStore: true };
 }
+
 
 function isHeyLikeLabel(label) {
   return /hey|opener/i.test(label || '');
