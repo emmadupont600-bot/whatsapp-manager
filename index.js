@@ -57,7 +57,7 @@ function authMiddleware(req, res, next) {
 }
 app.use('/api', authMiddleware);
 
-// ─── FIX : Rate-limiting sur les routes API (100 req/min par IP) ─────────────
+// ─── Rate-limiting sur les routes API (100 req/min par IP) ───────────────────
 const _rateLimitMap = new Map();
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX = 100;
@@ -75,7 +75,7 @@ function rateLimitMiddleware(req, res, next) {
 }
 app.use('/api', rateLimitMiddleware);
 
-// ─── Blacklist avec cache mémoire ─────────────────────────────────────────────
+// ─── Blacklist avec cache mémoire + flush debounce ────────────────────────────
 const BLACKLIST_FILE = path.join(__dirname, 'data', 'blacklist.json');
 let _blacklistCache = null;
 let _blacklistFlushTimer = null;
@@ -248,10 +248,10 @@ if (fs.existsSync(CONFIG_FILE)) {
     const saved = JSON.parse(fs.readFileSync(CONFIG_FILE,'utf-8'));
     Object.assign(config, saved);
     // FIX : valider la cohérence cross-champs au chargement depuis le disque
-    if (config.minDelay > config.maxDelay) config.maxDelay = config.minDelay;
+    if (config.minDelay        > config.maxDelay)        config.maxDelay        = config.minDelay;
     if (config.sessionPauseMin > config.sessionPauseMax) config.sessionPauseMax = config.sessionPauseMin;
-    if (config.typingMin > config.typingMax) config.typingMax = config.typingMin;
-    if (config.linkDelayMin > config.linkDelayMax) config.linkDelayMax = config.linkDelayMin;
+    if (config.typingMin       > config.typingMax)       config.typingMax       = config.typingMin;
+    if (config.linkDelayMin    > config.linkDelayMax)    config.linkDelayMax    = config.linkDelayMin;
     if (saved.dailyLimit && typeof saved.dailyLimit === 'object') {
       for (const [id, val] of Object.entries(saved.dailyLimit)) dailyLimitMap[id] = parseInt(val);
     }
@@ -605,7 +605,8 @@ class BotAccount {
     this.log(`🚀 Bot démarré (session ≤${config.sessionSize} msgs, limite/jour : ${this.dailyLimit})`,'success');
 
     while (this.state.queue.some(c => c.status === 'pending')) {
-      // FIX : vérifier running après chaque await long pour permettre un arrêt propre
+      // FIX : vérifier running en tête de boucle pour permettre un arrêt propre
+      // si state.running est passé à false pendant un await long (pause, délai, etc.)
       if (!this.state.running) break;
       if (!this.state.ready) { await sleep(10000); continue; }
       if (this.state.paused)  { await sleep(3000);  continue; }
@@ -636,7 +637,7 @@ class BotAccount {
       if (this.state.sessionCount > 0 && this.state.sessionCount % config.sessionSize === 0) {
         this.log(`📊 Session ${Math.floor(this.state.sessionCount/config.sessionSize)} terminée`,'info');
         await this._delaySession();
-        // FIX : sortir de la boucle si le bot a été stoppé pendant la pause session
+        // FIX : sortir si le bot a été stoppé pendant la pause session (peut durer 20 min)
         if (!this.state.running) break;
       }
 
@@ -667,7 +668,7 @@ class BotAccount {
         addToSentHistory(number, { sentAt: contact.sentAt, botId: this.id, message: rawMsg, prenom: contact.prenom, nom: contact.nom });
         this._saveQueue();
         await this._delayMsg();
-        // FIX : sortir de la boucle si le bot a été stoppé pendant le délai inter-messages
+        // FIX : sortir si le bot a été stoppé pendant le délai inter-messages
         if (!this.state.running) break;
       } catch(err) {
         if (this._detectBan(err.message)) { contact.status='pending'; this._handleBan(err); break; }
@@ -801,7 +802,7 @@ app.post('/api/:account/start', (req,res)=>{
   b.state.paused=false; b.state.limitReached=false; b.state.bannedAt=null;
   cancelSchedule(b.id); b.runQueue(otherBot(b)); res.json({ok:true});
 });
-// FIX : /api/:account/pause annule aussi le planning si actif
+// FIX : pause annule aussi le planning si actif (cohérence avec clear/reset)
 app.post('/api/:account/pause', (req,res)=>{
   const b=requireBot(req,res); if(!b) return;
   b.state.paused=!b.state.paused;
@@ -1069,7 +1070,7 @@ app.post('/api/start',(req,res)=>{
   cancelSchedule(bots[1].id);
   bots[1].runQueue(bots[2]); res.json({ok:true});
 });
-// FIX : /api/pause legacy annule aussi le planning si actif
+// FIX : pause legacy annule aussi le planning si actif
 app.post('/api/pause',(req,res)=>{
   bots[1].state.paused=!bots[1].state.paused;
   if (bots[1].state.paused) cancelSchedule(bots[1].id);
