@@ -145,29 +145,47 @@ function recordSessionEnd(botId, stats) {
   saveSessions(sessions);
 }
 
+// ─── FIX #11 : persistance des logs sur disque ───────────────────────────────
+// Avant : state.log était un tableau en mémoire, limité à 200 entrées et
+// entièrement perdu au redémarrage du processus (crash, déploiement, OOM…).
+// Après :
+//   • loadLogs(id)  → lit data/logs_{id}.json au démarrage
+//   • saveLogs(id)  → écrit data/logs_{id}.json (max MAX_LOG_ENTRIES entrées)
+//   • _flushLogs()  → appelé depuis log() avec debounce 2 s pour ne pas écrire
+//                     sur disque à chaque message (hot path de la boucle d'envoi)
+//   • GET /api/:account/logs → expose les logs paginés (query: page, limit, type)
+const MAX_LOG_ENTRIES = 1000; // nombre max d'entrées conservées sur disque
+const LOG_FLUSH_DEBOUNCE_MS = 2000;
+
+function logFilePath(id) {
+  return path.join(__dirname, 'data', `logs_${id}.json`);
+}
+function loadLogs(id) {
+  const file = logFilePath(id);
+  if (!fs.existsSync(file)) return [];
+  try { return JSON.parse(fs.readFileSync(file, 'utf-8')); } catch(e) { return []; }
+}
+function saveLogs(id, entries) {
+  const file = logFilePath(id);
+  const dir  = path.dirname(file);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  try {
+    fs.writeFileSync(file, JSON.stringify(entries.slice(0, MAX_LOG_ENTRIES), null, 2));
+  } catch(e) {
+    console.error(`[BOT${id}] Erreur écriture logs : ${e.message}`);
+  }
+}
+
 // ─── Config par défaut ───────────────────────────────────────────────────────
 // FIX #10 : dailyLimit n'est plus un objet figé {1: N, 2: N}.
-// Avant : seuls les IDs 1 et 2 étaient pré-remplis. Ajouter un 3ème bot ou
-// appeler set-limit sur un ID non prévu produisait un comportement non défini.
-// Désormais dailyLimit est un Proxy : lire dailyLimit[id] pour un ID inconnu
-// retourne DEFAULT_DAILY_LIMIT au lieu de undefined, et set-limit écrit
-// dynamiquement l'entrée pour cet ID. La valeur par défaut est centralisée
-// dans DEFAULT_DAILY_LIMIT afin d'être référencée de manière cohérente.
 const DEFAULT_DAILY_LIMIT = parseInt(process.env.DAILY_LIMIT || '300');
-
-// Stockage réel des limites personnalisées (rempli à la demande par set-limit).
 const _dailyLimitOverrides = {};
-
-// Proxy : lecture transparente avec fallback sur DEFAULT_DAILY_LIMIT.
 const dailyLimitMap = new Proxy(_dailyLimitOverrides, {
   get(target, id) {
     const numId = typeof id === 'symbol' ? id : Number(id);
     return target[numId] !== undefined ? target[numId] : DEFAULT_DAILY_LIMIT;
   },
-  set(target, id, value) {
-    target[Number(id)] = value;
-    return true;
-  }
+  set(target, id, value) { target[Number(id)] = value; return true; }
 });
 
 let config = {
@@ -180,8 +198,6 @@ let config = {
   typingMax:      parseInt(process.env.TYPING_MAX_MS     || '6000'),
   linkDelayMin:   parseInt(process.env.LINK_DELAY_MIN_MS || '8000'),
   linkDelayMax:   parseInt(process.env.LINK_DELAY_MAX_MS || '15000'),
-  // dailyLimit est maintenant géré via dailyLimitMap (Proxy dynamique).
-  // On garde la clé dans config uniquement pour la compatibilité avec saveConfig/loadConfig.
   dailyLimit:     {},
   autoResume:     true
 };
@@ -190,7 +206,6 @@ if (fs.existsSync(CONFIG_FILE)) {
   try {
     const saved = JSON.parse(fs.readFileSync(CONFIG_FILE,'utf-8'));
     Object.assign(config, saved);
-    // Restaure les overrides persistés dans dailyLimitMap
     if (saved.dailyLimit && typeof saved.dailyLimit === 'object') {
       for (const [id, val] of Object.entries(saved.dailyLimit)) {
         dailyLimitMap[id] = parseInt(val);
@@ -201,7 +216,6 @@ if (fs.existsSync(CONFIG_FILE)) {
 function saveConfig() {
   const dir = path.dirname(CONFIG_FILE);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  // Synchronise config.dailyLimit avec les overrides actuels avant sauvegarde
   config.dailyLimit = { ..._dailyLimitOverrides };
   fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
 }
@@ -249,7 +263,8 @@ class BotAccount {
     this.dataFile   = path.join(__dirname, 'data', `queue_${id}.json`);
     this.client     = null;
     this.retryCount = 0;
-    this._resumeTimer = null;
+    this._resumeTimer   = null;
+    this._logFlushTimer = null; // FIX #11 : timer debounce pour flush logs
     this._starting  = false;
     this.state = {
       qr: null, ready: false, running: false, paused: false,
@@ -261,16 +276,27 @@ class BotAccount {
       resumeAt: null,
       bannedAt: null,
       repliesReceived: 0,
-      log: [], stats: { sent: 0, failed: 0, skipped: 0, blacklisted: 0 }
+      // FIX #11 : logs chargés depuis le disque au démarrage (plus de perte au crash)
+      log: loadLogs(id),
+      stats: { sent: 0, failed: 0, skipped: 0, blacklisted: 0 }
     };
     this._loadQueue();
     this._autoResume();
     this._initClient();
   }
 
-  // FIX #10 : dailyLimit lit depuis dailyLimitMap (Proxy) au lieu de
-  // config.dailyLimit[this.id] qui était undefined pour tout ID != 1 ou 2.
   get dailyLimit() { return dailyLimitMap[this.id]; }
+
+  // FIX #11 : _flushLogs() écrit state.log sur disque avec un debounce de 2 s
+  // pour éviter un appel fs.writeFileSync à chaque log (peut arriver plusieurs
+  // fois par seconde pendant la boucle d'envoi).
+  _flushLogs() {
+    if (this._logFlushTimer) return; // flush déjà planifié
+    this._logFlushTimer = setTimeout(() => {
+      this._logFlushTimer = null;
+      saveLogs(this.id, this.state.log);
+    }, LOG_FLUSH_DEBOUNCE_MS);
+  }
 
   _loadQueue() {
     if (fs.existsSync(this.dataFile)) {
@@ -314,8 +340,13 @@ class BotAccount {
   log(msg, type = 'info') {
     const entry = { time: new Date().toISOString(), msg, type };
     this.state.log.unshift(entry);
-    if (this.state.log.length > 200) this.state.log = this.state.log.slice(0, 200);
+    // Garde les MAX_LOG_ENTRIES entrées les plus récentes en mémoire
+    if (this.state.log.length > MAX_LOG_ENTRIES) {
+      this.state.log = this.state.log.slice(0, MAX_LOG_ENTRIES);
+    }
     console.log(`[BOT${this.id}][${type.toUpperCase()}] ${msg}`);
+    // FIX #11 : planifie la persistance sur disque (debounce 2 s)
+    this._flushLogs();
   }
 
   _autoResume() {
@@ -671,6 +702,13 @@ class BotAccount {
     if(this._resumeTimer){clearTimeout(this._resumeTimer);this._resumeTimer=null;}
     this._saveQueue(); this.log('🗑️ Queue vidée','warn');
   }
+
+  // FIX #11 : efface les logs en mémoire ET sur disque
+  clearLogs() {
+    this.state.log = [];
+    saveLogs(this.id, []);
+    console.log(`[BOT${this.id}] Logs effacés`);
+  }
 }
 
 // ─── Deux comptes ─────────────────────────────────────────────────────────────
@@ -702,8 +740,6 @@ app.post('/api/:account/pause', (req,res)=>{ const b=requireBot(req,res); if(!b)
 app.post('/api/:account/clear', (req,res)=>{ const b=requireBot(req,res); if(!b) return; b.clear(); res.json({ok:true}); });
 app.post('/api/:account/reset', (req,res)=>{ const b=requireBot(req,res); if(!b) return; b.reset(); res.json({ok:true}); });
 
-// FIX #10 : set-limit écrit dans dailyLimitMap au lieu de config.dailyLimit[b.id],
-// ce qui fonctionnait avant uniquement parce que les IDs 1 et 2 étaient pré-remplis.
 app.post('/api/:account/set-limit', (req,res)=>{
   const b=requireBot(req,res); if(!b) return;
   const limit=parseInt(req.body.limit);
@@ -731,6 +767,29 @@ app.post('/api/:account/test-message', async(req,res)=>{
     if(!phone) return res.status(400).json({ok:false,error:'Numéro requis'});
     await b.sendTest(phone,message,link); res.json({ok:true});
   } catch(e){res.status(400).json({ok:false,error:e.message});}
+});
+
+// FIX #11 : nouvelle route GET /api/:account/logs
+// Paramètres query :
+//   page  (défaut 1)  — pagination
+//   limit (défaut 100, max 500)
+//   type  (optionnel) — filtre sur le champ type : info | warn | error | success
+app.get('/api/:account/logs', (req,res)=>{
+  const b=requireBot(req,res); if(!b) return;
+  const { page=1, limit=100, type='' } = req.query;
+  const perPage = Math.min(parseInt(limit)||100, 500);
+  let entries = b.state.log;
+  if (type) entries = entries.filter(e => e.type === type);
+  const total = entries.length;
+  const start = (parseInt(page)-1)*perPage;
+  res.json({ total, page: parseInt(page), perPage, items: entries.slice(start, start+perPage) });
+});
+
+// FIX #11 : DELETE /api/:account/logs — efface les logs du bot (mémoire + disque)
+app.delete('/api/:account/logs', (req,res)=>{
+  const b=requireBot(req,res); if(!b) return;
+  b.clearLogs();
+  res.json({ok:true});
 });
 
 app.get('/api/stats', (req,res)=>{
@@ -851,7 +910,6 @@ app.post('/api/blacklist/import', upload.single('file'), (req,res)=>{
 });
 
 app.get('/api/config',(req,res)=>{
-  // FIX #10 : expose dailyLimit comme objet lisible avec toutes les overrides
   res.json({ ...config, dailyLimit: { ..._dailyLimitOverrides } });
 });
 app.post('/api/config',(req,res)=>{
