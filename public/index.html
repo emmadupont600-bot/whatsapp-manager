@@ -883,7 +883,7 @@ function showPage(name, el) {
   const label = currentAccount===2 ? 'Compte 2' : 'Compte 1';
   if (name==='dashboard')  document.getElementById('dash-title').textContent   = `Dashboard — ${label}`;
   if (name==='import')     document.getElementById('import-title').textContent  = `Importer — ${label}`;
-  if (name==='connection') document.getElementById('conn-title').textContent    = `Connexion — ${label}`;
+  if (name==='connection') { document.getElementById('conn-title').textContent = `Connexion — ${label}`; fetchStatus(); }
   if (name==='queue')      { document.getElementById('queue-title').textContent = `Queue — ${label}`; loadQueue(); }
   if (name==='groups')     loadGroups();
   if (name==='overview')   renderOverview();
@@ -930,6 +930,13 @@ function applyStatus(r) {
   if (!prev.limitReached && r.limitReached) {
     fireNotification('⛔ Quota atteint', `Compte ${acct} — ${r.dailySent}/${r.dailyLimit} msgs. Reprise dans ${formatCountdown(r.resetInMs)}.`, '⛔');
   }
+
+
+    // FIX: QR + badges toujours mis à jour peu importe la page active
+  updateQR(r.qr, r.ready, acct);
+  const _b1=document.getElementById('conn-badge-1'),_b2=document.getElementById('conn-badge-2');
+  if (acct===1&&_b1) _b1.textContent=r.ready?'✅':'N°1';
+  if (acct===2&&_b2) _b2.textContent=r.ready?'✅':'N°2';
 
   if (!document.getElementById('page-dashboard').classList.contains('active')) return;
 
@@ -1002,11 +1009,6 @@ function applyStatus(r) {
   } else {
     statEta.textContent=r.total>0?'✅':'—'; etaLabel.textContent=r.total>0?'terminé':'aucun contact'; etaBox.style.display='none';
   }
-
-  updateQR(r.qr, r.ready, acct);
-  const b1=document.getElementById('conn-badge-1'),b2=document.getElementById('conn-badge-2');
-  if (acct===1&&b1) b1.textContent=r.ready?'✅':'N°1';
-  if (acct===2&&b2) b2.textContent=r.ready?'✅':'N°2';
 
   document.getElementById('log').innerHTML = r.log.map(l=>{
     const t=new Date(l.time).toLocaleTimeString('fr-FR');
