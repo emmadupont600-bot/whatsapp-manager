@@ -136,18 +136,70 @@ function _flushSentHistory() {
 
 function loadSentHistory() { return _getSentHistoryCache(); }
 function saveSentHistory(hist) { _sentHistoryCache = hist; _flushSentHistory(); }
+
+function normalizeHistoryEntry(raw) {
+  if (!raw) return null;
+  if (Array.isArray(raw.contacts) && raw.contacts.length) return raw;
+  if (raw.sentAt || raw.message) {
+    return {
+      prenom: raw.prenom || '',
+      nom: raw.nom || '',
+      contacts: [{
+        sentAt: raw.sentAt || new Date().toISOString(),
+        botId: raw.botId,
+        message: (raw.message || '').substring(0, 500),
+        link: raw.link || ''
+      }]
+    };
+  }
+  return { prenom: raw.prenom || '', nom: raw.nom || '', contacts: [] };
+}
+
+function enrichHistoryEntry(phone, raw) {
+  const entry = normalizeHistoryEntry(raw);
+  if (!entry) return null;
+  const contacts = [...entry.contacts].sort((a, b) => new Date(b.sentAt) - new Date(a.sentAt));
+  const last = contacts[0] || {};
+  return {
+    phone,
+    prenom: entry.prenom,
+    nom: entry.nom,
+    contactCount: contacts.length,
+    lastSentAt: last.sentAt || null,
+    lastMessage: last.message || '',
+    lastLink: last.link || '',
+    lastBotId: last.botId,
+    contacts
+  };
+}
+
+function getHistoryEntry(phone, cachedHist) {
+  const clean = phone.replace(/\D/g, '');
+  const raw = (cachedHist || _getSentHistoryCache())[clean];
+  if (!raw) return null;
+  return enrichHistoryEntry(clean, raw);
+}
+
 function addToSentHistory(phone, data) {
   const hist  = _getSentHistoryCache();
-  const clean = phone.replace(/\D/g,'');
-  if (!hist[clean]) {
-    hist[clean] = { sentAt: data.sentAt || new Date().toISOString(), botId: data.botId, message: (data.message||'').substring(0,200), prenom: data.prenom||'', nom: data.nom||'' };
-    _flushSentHistory();
-  }
+  const clean = phone.replace(/\D/g, '');
+  let entry = hist[clean] ? normalizeHistoryEntry(hist[clean]) : { prenom: '', nom: '', contacts: [] };
+  if (data.prenom) entry.prenom = data.prenom;
+  if (data.nom) entry.nom = data.nom;
+  entry.contacts.push({
+    sentAt: data.sentAt || new Date().toISOString(),
+    botId: data.botId,
+    message: (data.message || '').substring(0, 500),
+    link: (data.link || '').substring(0, 300)
+  });
+  hist[clean] = entry;
+  _flushSentHistory();
 }
+
 function isAlreadySent(phone, cachedHist) {
-  const clean = phone.replace(/\D/g,'');
-  return (cachedHist || _getSentHistoryCache())[clean] || null;
+  return getHistoryEntry(phone, cachedHist);
 }
+
 function removeFromSentHistory(phone) {
   const hist = _getSentHistoryCache();
   delete hist[phone.replace(/\D/g,'')];
@@ -665,7 +717,7 @@ class BotAccount {
         contact.status='done'; contact.sentAt=new Date().toISOString(); contact.waMessageId=msgId;
         this.state.stats.sent++; this.state.sessionCount++; this.state.dailySent++;
         this.log(`✅ Envoyé à +${number}${contact.prenom?' ('+contact.prenom+')':''}${contact.link?' 🔗':''} [${this.state.dailySent}/${this.dailyLimit}] id:${msgId}`,'success');
-        addToSentHistory(number, { sentAt: contact.sentAt, botId: this.id, message: rawMsg, prenom: contact.prenom, nom: contact.nom });
+        addToSentHistory(number, { sentAt: contact.sentAt, botId: this.id, message: rawMsg, link: personalizedLink, prenom: contact.prenom, nom: contact.nom });
         this._saveQueue();
         await this._delayMsg();
         // FIX : sortir si le bot a été stoppé pendant le délai inter-messages
@@ -702,9 +754,19 @@ class BotAccount {
       const nom=row.nom||row.name||row.lastname||row.last_name||row.Nom||row['Nom']||'';
       if (isBlacklisted(phone, blacklistCache)) { blacklisted++; continue; }
       if (this.state.queue.find(c=>c.phone.replace(/\D/g,'')=== phone)) { skippedQueue++; continue; }
-      const histEntry=isAlreadySent(phone, sentHistoryCache);
+      const histEntry = getHistoryEntry(phone, sentHistoryCache);
       if (histEntry && !forceIncludeDuplicates.includes(phone)) {
-        duplicates.push({ phone, prenom: prenom.trim(), nom: nom.trim(), sentAt: histEntry.sentAt, botId: histEntry.botId, message: histEntry.message });
+        duplicates.push({
+          phone,
+          prenom: prenom.trim() || histEntry.prenom,
+          nom: nom.trim() || histEntry.nom,
+          contactCount: histEntry.contactCount,
+          lastSentAt: histEntry.lastSentAt,
+          lastMessage: histEntry.lastMessage,
+          lastLink: histEntry.lastLink,
+          lastBotId: histEntry.lastBotId,
+          contacts: histEntry.contacts.slice(0, 15)
+        });
         continue;
       }
       this.state.queue.push({ phone, status:'pending', prenom:prenom.trim(), nom:nom.trim(), message:row.message||defaultMessage, link:row.link||defaultLink||'', addedAt:new Date().toISOString() });
@@ -930,14 +992,28 @@ app.delete('/api/:account/queue/:phone', (req,res)=>{
 });
 
 app.get('/api/sent-history', (req,res)=>{
-  const hist=loadSentHistory();
-  const list=Object.entries(hist).map(([phone,d])=>({phone,...d}));
-  list.sort((a,b)=>new Date(b.sentAt)-new Date(a.sentAt));
-  const{page=1,limit=100,q=''}=req.query;
+  const hist = loadSentHistory();
+  let list = Object.entries(hist)
+    .map(([phone, raw]) => enrichHistoryEntry(phone, raw))
+    .filter(Boolean);
+  list.sort((a, b) => new Date(b.lastSentAt || 0) - new Date(a.lastSentAt || 0));
+  const { page = 1, limit = 100, q = '', minCount = 0 } = req.query;
   const perPage = Math.min(Math.max(parseInt(limit) || 100, 1), 50000);
-  const filtered=q?list.filter(x=>x.phone.includes(q)||(x.prenom||'').toLowerCase().includes(q.toLowerCase())||(x.nom||'').toLowerCase().includes(q.toLowerCase())):list;
-  const start=(parseInt(page)-1)*perPage;
-  res.json({total:filtered.length,items:filtered.slice(start,start+perPage)});
+  const qLower = String(q).toLowerCase();
+  let filtered = list;
+  if (qLower) {
+    filtered = filtered.filter(x =>
+      x.phone.includes(q) ||
+      (x.prenom || '').toLowerCase().includes(qLower) ||
+      (x.nom || '').toLowerCase().includes(qLower) ||
+      (x.lastMessage || '').toLowerCase().includes(qLower) ||
+      String(x.lastBotId || '').includes(q)
+    );
+  }
+  const min = parseInt(minCount) || 0;
+  if (min > 1) filtered = filtered.filter(x => x.contactCount >= min);
+  const start = (parseInt(page) - 1) * perPage;
+  res.json({ total: filtered.length, items: filtered.slice(start, start + perPage) });
 });
 app.delete('/api/sent-history/:phone',(req,res)=>{ removeFromSentHistory(req.params.phone); res.json({ok:true}); });
 app.delete('/api/sent-history',       (req,res)=>{ saveSentHistory({}); res.json({ok:true}); });

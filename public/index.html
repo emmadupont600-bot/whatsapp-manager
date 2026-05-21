@@ -324,9 +324,16 @@ tr:hover td{background:var(--surface2)}
         <div id="link-preview-wrap"></div>
       </div>
 
+      <div class="card" id="import-hist-hint" style="display:none;background:color-mix(in oklch,var(--blue) 6%,var(--surface));border-color:color-mix(in oklch,var(--blue) 25%,transparent)">
+        <div style="font-size:13px;line-height:1.6">
+          <strong style="color:var(--blue)">📋 Mémoire des contacts</strong> — <span id="import-hist-count">0</span> numéros déjà contactés sont mémorisés (message, date, nombre de fois).
+          <button type="button" class="btn btn-ghost" style="padding:4px 10px;font-size:11px;margin-left:6px" onclick="goToHistoryPage()">Voir l'historique</button>
+        </div>
+      </div>
+
       <div class="card">
         <div class="card-title">Fichiers CSV</div>
-        <p style="color:var(--muted);font-size:12px;margin-bottom:12px">Colonnes : <strong>telephone</strong> (requis) · <strong>prenom</strong>, <strong>nom</strong>, <strong>message</strong>, <strong>link</strong> (optionnel)</p>
+        <p style="color:var(--muted);font-size:12px;margin-bottom:12px">Colonnes : <strong>telephone</strong> (requis) · <strong>prenom</strong>, <strong>nom</strong>, <strong>message</strong>, <strong>link</strong> (optionnel). Les numéros déjà contactés seront signalés avec le résumé des envois précédents.</p>
 
         <div class="merge-mode-box" id="merge-info" style="display:none">
           ℹ️ <span id="merge-info-text">Mode fusion activé — les doublons seront ignorés automatiquement.</span>
@@ -345,7 +352,7 @@ tr:hover td{background:var(--surface2)}
           <p style="font-size:12px;color:var(--muted);margin-bottom:10px">Ces numéros figurent dans l'historique global. Cochez ceux à réimporter quand même.</p>
           <div class="table-wrap" style="max-height:220px;overflow-y:auto;margin-bottom:12px">
             <table>
-              <thead><tr><th style="width:36px"><input type="checkbox" id="dup-select-all" onchange="toggleDupSelectAll(this.checked)"></th><th>Téléphone</th><th>Prénom</th><th>Dernier envoi</th><th>Compte</th></tr></thead>
+              <thead><tr><th style="width:36px"><input type="checkbox" id="dup-select-all" onchange="toggleDupSelectAll(this.checked)"></th><th>Téléphone</th><th>Prénom</th><th>Fois</th><th>Pourquoi (dernier message)</th><th>Dernier envoi</th><th>Cpte</th></tr></thead>
               <tbody id="dup-table"></tbody>
             </table>
           </div>
@@ -461,11 +468,10 @@ tr:hover td{background:var(--surface2)}
 
   <div class="card" style="padding:14px 18px">
     <div class="queue-toolbar">
-      <input type="text" id="hist-search" placeholder="🔍 Numéro, prénom, compte..." oninput="renderHistory()" style="max-width:280px">
+      <input type="text" id="hist-search" placeholder="🔍 Numéro, prénom, message envoyé..." oninput="renderHistory()" style="max-width:300px">
       <div class="status-filter">
         <button class="filter-btn active" data-status="all" onclick="setHistFilter('all',this)">Tous</button>
-        <button class="filter-btn" data-status="done" onclick="setHistFilter('done',this)">✅ Done</button>
-        <button class="filter-btn" data-status="failed" onclick="setHistFilter('failed',this)">❌ Failed</button>
+        <button class="filter-btn" data-status="repeat" onclick="setHistFilter('repeat',this)">🔁 2+ fois</button>
         <button class="filter-btn" data-status="bot1" onclick="setHistFilter('bot1',this)">Compte 1</button>
         <button class="filter-btn" data-status="bot2" onclick="setHistFilter('bot2',this)">Compte 2</button>
       </div>
@@ -476,7 +482,7 @@ tr:hover td{background:var(--surface2)}
   <div class="card">
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Téléphone</th><th>Prénom / Nom</th><th>Compte</th><th>Statut</th><th>Réponse</th><th>Envoyé le</th><th style="width:60px">Action</th></tr></thead>
+        <thead><tr><th>Téléphone</th><th>Prénom / Nom</th><th>Fois</th><th>Dernier envoi</th><th>Pourquoi (message)</th><th>Compte</th><th style="width:100px">Actions</th></tr></thead>
         <tbody id="hist-table"><tr><td colspan="7" style="color:var(--muted);text-align:center;padding:24px">Cliquez sur Actualiser</td></tr></tbody>
       </table>
     </div>
@@ -521,7 +527,14 @@ tr:hover td{background:var(--surface2)}
     <!-- ─── GROUPES ──────────────────────────────────── -->
     <div class="page" id="page-groups">
       <div class="page-header"><h1 class="page-title">Groupes WhatsApp</h1><button class="btn btn-ghost" onclick="loadGroups()">Actualiser</button></div>
-      <div class="card"><div class="table-wrap"><table><thead><tr><th>Groupe</th><th>Membres</th><th>Export</th></tr></thead><tbody id="groups-table"><tr><td colspan="3" style="color:var(--muted);text-align:center;padding:20px">Cliquez sur Actualiser</td></tr></tbody></table></div></div>
+      <div class="card" style="padding:12px 16px;margin-bottom:14px">
+        <p style="font-size:12px;color:var(--muted);line-height:1.6">
+          Export CSV : <strong>telephone</strong>, <strong>prenom</strong> et <strong>nom</strong> (profil WhatsApp si visible).
+          Les numéros sans nom affiché restent exportés avec téléphone seulement — comptez ~2 s par membre pour les gros groupes.
+        </p>
+      </div>
+      <div class="card"><div class="table-wrap"><table><thead><tr><th>Groupe</th><th>Membres</th><th>Export CSV</th></tr></thead><tbody id="groups-table"><tr><td colspan="3" style="color:var(--muted);text-align:center;padding:20px">Cliquez sur Actualiser</td></tr></tbody></table></div></div>
+      <div id="groups-export-status" style="font-size:12px;color:var(--muted);margin-top:8px"></div>
     </div>
 
     <!-- ─── CONNEXION ────────────────────────────────── -->
@@ -602,6 +615,28 @@ tr:hover td{background:var(--surface2)}
 ═══════════════════════════════════════════════════ */
 let histData = [], histFilter = 'all', histSearch = '', histPage = 1;
 const HIST_PER_PAGE = 50;
+let expandedHistPhones = new Set();
+
+function escHtml(s) {
+  return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
+}
+function msgSummary(msg, max = 72) {
+  const t = (msg || '').trim().replace(/\s+/g, ' ');
+  if (!t) return '—';
+  return t.length > max ? t.slice(0, max) + '…' : t;
+}
+function formatHistContactsDetail(contacts) {
+  if (!contacts || !contacts.length) return '<span style="color:var(--muted)">Aucun détail</span>';
+  return contacts.map((h, i) => {
+    const d = h.sentAt ? new Date(h.sentAt).toLocaleString('fr-FR') : '—';
+    const bot = h.botId ? `Compte ${h.botId}` : '';
+    const link = h.link ? `<br><span style="color:var(--blue)">🔗 ${escHtml(h.link)}</span>` : '';
+    return `<div style="padding:8px 0;border-bottom:1px solid var(--border)">
+      <div style="font-size:11px;color:var(--muted)">#${i + 1} · ${d} · ${bot}</div>
+      <div style="font-size:12px;margin-top:4px;white-space:pre-wrap">${escHtml(h.message || '—')}</div>${link}
+    </div>`;
+  }).join('');
+}
 
 async function loadHistory() {
   document.getElementById('hist-table').innerHTML = '<tr><td colspan="7" style="color:var(--muted);text-align:center;padding:24px">⏳ Chargement...</td></tr>';
@@ -625,13 +660,15 @@ function setHistFilter(status, btn) {
 function renderHistory() {
   histSearch = (document.getElementById('hist-search').value||'').toLowerCase();
   let filtered = histData;
-  if (histFilter === 'bot1') filtered = filtered.filter(c => Number(c.botId || c.account) === 1);
-  else if (histFilter === 'bot2') filtered = filtered.filter(c => Number(c.botId || c.account) === 2);
+  if (histFilter === 'bot1') filtered = filtered.filter(c => Number(c.lastBotId || c.botId || c.account) === 1);
+  else if (histFilter === 'bot2') filtered = filtered.filter(c => Number(c.lastBotId || c.botId || c.account) === 2);
+  else if (histFilter === 'repeat') filtered = filtered.filter(c => (c.contactCount || 1) >= 2);
   if (histSearch) filtered = filtered.filter(c=>
     String(c.phone||c.telephone||'').includes(histSearch) ||
     String(c.prenom||c.name||'').toLowerCase().includes(histSearch) ||
     String(c.nom||'').toLowerCase().includes(histSearch) ||
-    String(c.botId||c.account||'').includes(histSearch)
+    String(c.lastMessage||c.message||'').toLowerCase().includes(histSearch) ||
+    String(c.lastBotId||c.botId||c.account||'').includes(histSearch)
   );
   const total = filtered.length;
   document.getElementById('hist-count-label').textContent = `${total} entrée${total>1?'s':''}`;
@@ -643,23 +680,39 @@ function renderHistory() {
   if (!page.length) {
     tbody.innerHTML = `<tr><td colspan="7"><div class="empty-state"><div style="font-size:32px">🕓</div><p>Aucun résultat.</p></div></td></tr>`;
   } else {
-    tbody.innerHTML = page.map(c => {
-      const phone   = c.phone||c.telephone||'';
-      const prenom  = c.prenom||c.name||'';
-      const acctNum = c.botId || c.account;
-      const acct    = acctNum ? `<span class="account-badge ${acctNum==2?'badge-a2':'badge-a1'}">N°${acctNum}</span>` : '—';
-      const reply   = c.replyText ? `<span title="${c.replyText.replace(/"/g,'&quot;')}" style="cursor:help;color:var(--purple)">💬 ${c.replyText.substring(0,30)}${c.replyText.length>30?'…':''}</span>` : '—';
-      const sentAt  = c.sentAt ? new Date(c.sentAt).toLocaleString('fr-FR') : '—';
-      return `<tr>
+    let rows = '';
+    for (const c of page) {
+      const phone = c.phone || c.telephone || '';
+      const prenom = c.prenom || c.name || '';
+      const nom = c.nom || '';
+      const count = c.contactCount || (c.contacts ? c.contacts.length : 1);
+      const acctNum = c.lastBotId || c.botId || c.account;
+      const acct = acctNum ? `<span class="account-badge ${acctNum==2?'badge-a2':'badge-a1'}">N°${acctNum}</span>` : '—';
+      const sentAt = c.lastSentAt || c.sentAt;
+      const sentStr = sentAt ? new Date(sentAt).toLocaleString('fr-FR') : '—';
+      const why = msgSummary(c.lastMessage || c.message);
+      const whyTitle = escHtml(c.lastMessage || c.message || '');
+      const expanded = expandedHistPhones.has(phone);
+      rows += `<tr>
         <td style="font-family:monospace;font-size:12px">${phone}</td>
-        <td>${prenom||'—'}</td>
+        <td>${prenom ? `<strong>${escHtml(prenom)}</strong>` : ''}${nom ? ' '+escHtml(nom) : prenom ? '' : '—'}</td>
+        <td><span class="badge ${count>=3?'badge-yellow':count>=2?'badge-blue':'badge-green'}">${count}×</span></td>
+        <td style="font-size:11px;color:var(--muted)">${sentStr}</td>
+        <td style="max-width:220px;font-size:12px" title="${whyTitle}">${escHtml(why)}</td>
         <td>${acct}</td>
-        <td>${statusBadge(c.status||'done')}</td>
-        <td style="max-width:180px">${reply}</td>
-        <td style="font-size:11px;color:var(--muted)">${sentAt}</td>
-        <td><button class="btn btn-danger" style="padding:3px 8px;font-size:11px" onclick="deleteHistEntry('${phone}')">🗑</button></td>
+        <td style="white-space:nowrap">
+          <button class="btn btn-ghost" style="padding:3px 8px;font-size:11px" onclick="toggleHistDetail('${phone}')">${expanded?'▲':'▼'} Détail</button>
+          <button class="btn btn-danger" style="padding:3px 8px;font-size:11px" onclick="deleteHistEntry('${phone}')" title="Retirer de la mémoire (pourrait être recontacté à l'import)">🗑</button>
+        </td>
       </tr>`;
-    }).join('');
+      if (expanded) {
+        rows += `<tr><td colspan="7" style="background:var(--surface2);padding:12px 16px">
+          <div style="font-size:11px;font-weight:600;color:var(--muted);margin-bottom:6px">Historique des ${count} contact${count>1?'s':''}</div>
+          ${formatHistContactsDetail(c.contacts)}
+        </td></tr>`;
+      }
+    }
+    tbody.innerHTML = rows;
   }
 
   const pg = document.getElementById('hist-pagination');
@@ -673,8 +726,26 @@ function renderHistory() {
 
 function goHistPage(n) { histPage=n; renderHistory(); }
 
+function toggleHistDetail(phone) {
+  if (expandedHistPhones.has(phone)) expandedHistPhones.delete(phone);
+  else expandedHistPhones.add(phone);
+  renderHistory();
+}
+
+async function loadImportHistoryHint() {
+  try {
+    const r = await fetch('/api/sent-history?limit=1').then(res => res.json());
+    const total = r.total ?? 0;
+    const box = document.getElementById('import-hist-hint');
+    if (total > 0) {
+      document.getElementById('import-hist-count').textContent = total;
+      box.style.display = 'block';
+    } else box.style.display = 'none';
+  } catch (_) {}
+}
+
 async function deleteHistEntry(phone) {
-  if (!confirm(`Supprimer l'entrée ${phone} de l'historique ?`)) return;
+  if (!confirm(`Retirer ${phone} de la mémoire des contacts ?\n\nCe numéro pourra être recontacté à l'import sans alerte doublon.`)) return;
   try {
     await fetch(`/api/sent-history/${encodeURIComponent(phone.replace(/\D/g,''))}`, {method:'DELETE'});
     histData = histData.filter(c => (c.phone||c.telephone||'').replace(/\D/g,'') !== phone.replace(/\D/g,''));
@@ -971,12 +1042,12 @@ function showPage(name, el) {
   el.classList.add('active');
   const label = currentAccount===2 ? 'Compte 2' : 'Compte 1';
   if (name==='dashboard')  document.getElementById('dash-title').textContent   = `Dashboard — ${label}`;
-  if (name==='import')     document.getElementById('import-title').textContent  = `Importer — ${label}`;
+  if (name==='import')     { document.getElementById('import-title').textContent  = `Importer — ${label}`; loadImportHistoryHint(); }
   if (name==='connection') { document.getElementById('conn-title').textContent = `Connexion — ${label}`; fetchStatus(); }
   if (name==='queue')      { document.getElementById('queue-title').textContent = `Queue — ${label}`; loadQueue(); }
   if (name==='groups')     loadGroups();
   if (name==='overview')   renderOverview();
-  if (name==='history')    loadHistory();
+  if (name==='history')    { loadHistory(); loadImportHistoryHint(); }
   if (name==='stats')      { if (!window.Chart) loadChartJS(); else loadStats(); }
   if (name==='settings')   { loadSettings(); updateNotifUI(); }
   if (name==='blacklist')  loadBlacklist();
@@ -1484,13 +1555,20 @@ function showDuplicatePanel(duplicates) {
   pendingImportContext.duplicates = unique;
   const tbody = document.getElementById('dup-table');
   tbody.innerHTML = unique.map(d => {
-    const sent = d.sentAt ? new Date(d.sentAt).toLocaleString('fr-FR') : '—';
-    const bot = d.botId ? `N°${d.botId}` : '—';
+    const sent = d.lastSentAt || d.sentAt;
+    const sentStr = sent ? new Date(sent).toLocaleString('fr-FR') : '—';
+    const bot = (d.lastBotId || d.botId) ? `N°${d.lastBotId || d.botId}` : '—';
+    const count = d.contactCount || 1;
+    const why = msgSummary(d.lastMessage || d.message, 50);
+    const detail = (d.contacts && d.contacts.length > 1)
+      ? `<div style="font-size:10px;color:var(--muted);margin-top:2px">${d.contacts.length} envois enregistrés</div>` : '';
     return `<tr>
       <td><input type="checkbox" class="dup-cb" value="${d.phone}" checked></td>
       <td style="font-family:monospace;font-size:12px">${d.phone}</td>
-      <td>${d.prenom || '—'} ${d.nom || ''}</td>
-      <td style="font-size:11px;color:var(--muted)">${sent}</td>
+      <td>${escHtml(d.prenom || '—')} ${escHtml(d.nom || '')}</td>
+      <td><span class="badge badge-yellow">${count}×</span></td>
+      <td style="max-width:200px;font-size:11px" title="${escHtml(d.lastMessage||'')}">${escHtml(why)}${detail}</td>
+      <td style="font-size:11px;color:var(--muted)">${sentStr}</td>
       <td>${bot}</td>
     </tr>`;
   }).join('');
@@ -1665,11 +1743,38 @@ async function renderOverview() {
 /* ═══════════════════════════════════════════════════
    GROUPS
 ═══════════════════════════════════════════════════ */
+function goToHistoryPage() {
+  const btn = [...document.querySelectorAll('.nav-item')].find(n => (n.getAttribute('onclick') || '').includes("showPage('history'"));
+  showPage('history', btn || document.querySelector('.nav-item'));
+}
+
+function exportGroup(btn) {
+  const groupName = decodeURIComponent(btn.dataset.group || '');
+  const enc = encodeURIComponent(groupName);
+  const status = document.getElementById('groups-export-status');
+  const estSec = Math.max(30, Math.round((parseInt(btn.dataset.members, 10) || 50) * 2));
+  if (status) status.innerHTML = `⏳ Export « ${escHtml(groupName)} » en cours (~${estSec}s) : téléphone + prénom/nom si disponibles sur WhatsApp…`;
+  btn.disabled = true;
+  btn.textContent = '⏳ Export…';
+  window.open(`/api/${currentAccount}/export-group/${enc}`, '_blank');
+  setTimeout(() => {
+    btn.disabled = false;
+    btn.textContent = '⬇ Exporter CSV';
+    if (status) status.innerHTML = '✓ Téléchargement lancé. Rouvrez si le fichier est vide (connexion requise).';
+  }, Math.min(estSec * 1000, 120000));
+}
+
 async function loadGroups() {
   const groups=await fetch(`/api/${currentAccount}/groups`).then(r=>r.json());
   const tbody=document.getElementById('groups-table');
-  if(!groups.length){tbody.innerHTML='<tr><td colspan="3" style="color:var(--muted);text-align:center;padding:20px">Aucun groupe</td></tr>';return;}
-  tbody.innerHTML=groups.map(g=>`<tr><td><strong>${g.name}</strong></td><td>${g.count}</td><td><a href="/api/${currentAccount}/export-group/${encodeURIComponent(g.name)}" class="btn btn-ghost" style="padding:5px 11px;font-size:12px" target="_blank">Exporter</a></td></tr>`).join('');
+  const status=document.getElementById('groups-export-status');
+  if (status) status.textContent='';
+  if(!groups.length){tbody.innerHTML='<tr><td colspan="3" style="color:var(--muted);text-align:center;padding:20px">Aucun groupe (connectez WhatsApp)</td></tr>';return;}
+  tbody.innerHTML=groups.map(g=>`<tr>
+      <td><strong>${escHtml(g.name)}</strong></td>
+      <td>${g.count||0}</td>
+      <td><button type="button" class="btn btn-ghost" style="padding:5px 11px;font-size:12px" data-group="${encodeURIComponent(g.name)}" data-members="${g.count||0}" onclick="exportGroup(this)">⬇ Exporter CSV</button></td>
+    </tr>`).join('');
 }
 
 /* ═══════════════════════════════════════════════════
