@@ -16,10 +16,10 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
-// FIX #5 : limite de taille fichier à 10 Mo
+// Limite de taille fichier à 10 Mo
 const upload = multer({ dest: 'uploads/', limits: { fileSize: 10 * 1024 * 1024 } });
 
-// FIX #9 : nettoyage automatique du dossier uploads/.
+// Nettoyage automatique du dossier uploads/
 const UPLOADS_DIR  = path.join(__dirname, 'uploads');
 const MAX_AGE_MS   = 60 * 60 * 1000; // 1 heure
 
@@ -42,7 +42,9 @@ function cleanUploadsDir() {
 cleanUploadsDir();
 setInterval(cleanUploadsDir, MAX_AGE_MS);
 
-// ─── FIX #8 : Middleware d'authentification par token Bearer ─────────────────
+// ─── Middleware d'authentification par token Bearer ───────────────────────────
+// Si AUTH_TOKEN n'est pas défini, TOUTES les routes /api sont publiques.
+// Définir la variable d'environnement AUTH_TOKEN pour activer la protection.
 const AUTH_TOKEN = process.env.AUTH_TOKEN || '';
 function authMiddleware(req, res, next) {
   if (!AUTH_TOKEN) return next();
@@ -55,24 +57,55 @@ function authMiddleware(req, res, next) {
 }
 app.use('/api', authMiddleware);
 
-// ─── Blacklist ───────────────────────────────────────────────────────────────
+// ─── FIX : Rate-limiting sur les routes API (100 req/min par IP) ─────────────
+const _rateLimitMap = new Map();
+const RATE_LIMIT_WINDOW_MS = 60_000;
+const RATE_LIMIT_MAX = 100;
+function rateLimitMiddleware(req, res, next) {
+  const key = req.ip;
+  const now = Date.now();
+  const entry = _rateLimitMap.get(key) || { count: 0, start: now };
+  if (now - entry.start > RATE_LIMIT_WINDOW_MS) { entry.count = 0; entry.start = now; }
+  entry.count++;
+  _rateLimitMap.set(key, entry);
+  if (entry.count > RATE_LIMIT_MAX) {
+    return res.status(429).json({ ok: false, error: 'Trop de requêtes. Réessayez dans une minute.' });
+  }
+  next();
+}
+app.use('/api', rateLimitMiddleware);
+
+// ─── Blacklist avec cache mémoire ─────────────────────────────────────────────
 const BLACKLIST_FILE = path.join(__dirname, 'data', 'blacklist.json');
-function loadBlacklist() {
+let _blacklistCache = null;
+let _blacklistFlushTimer = null;
+
+function _loadBlacklistFromDisk() {
   if (!fs.existsSync(BLACKLIST_FILE)) return [];
   try { return JSON.parse(fs.readFileSync(BLACKLIST_FILE, 'utf-8')); } catch(e) { return []; }
 }
-function saveBlacklist(list) {
-  const dir = path.dirname(BLACKLIST_FILE);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(BLACKLIST_FILE, JSON.stringify([...new Set(list)], null, 2));
+function _getBlacklistCache() {
+  if (_blacklistCache === null) _blacklistCache = _loadBlacklistFromDisk();
+  return _blacklistCache;
 }
+function _flushBlacklist() {
+  if (_blacklistFlushTimer) return;
+  _blacklistFlushTimer = setTimeout(() => {
+    _blacklistFlushTimer = null;
+    const dir = path.dirname(BLACKLIST_FILE);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    try { fs.writeFileSync(BLACKLIST_FILE, JSON.stringify([...new Set(_blacklistCache)], null, 2)); }
+    catch(e) { console.error('[BLACKLIST] Erreur écriture :', e.message); }
+  }, 500);
+}
+function loadBlacklist() { return _getBlacklistCache(); }
+function saveBlacklist(list) { _blacklistCache = [...new Set(list)]; _flushBlacklist(); }
 function isBlacklisted(phone, cachedList) {
   const clean = phone.replace(/\D/g,'');
-  const list = cachedList || loadBlacklist();
-  return list.some(p => p.replace(/\D/g,'') === clean);
+  return (cachedList || _getBlacklistCache()).some(p => p.replace(/\D/g,'') === clean);
 }
 
-// ─── FIX : sent-history en cache mémoire + flush debounce ─────────────────
+// ─── sent-history en cache mémoire + flush debounce ──────────────────────────
 const SENT_HISTORY_FILE = path.join(__dirname, 'data', 'sent-history.json');
 const SENT_HISTORY_FLUSH_MS = 3000;
 let _sentHistoryCache = null;
@@ -121,7 +154,7 @@ function removeFromSentHistory(phone) {
   _flushSentHistory();
 }
 
-// ─── Planning (scheduled start) ─────────────────────────────────────────────
+// ─── Planning (scheduled start) ──────────────────────────────────────────────
 const schedules = {};
 function cancelSchedule(accountId) {
   if (schedules[accountId]) { clearTimeout(schedules[accountId].timerId); delete schedules[accountId]; }
@@ -153,7 +186,7 @@ function setSchedule(bot, scheduledAt, relayBot) {
   return { ok: true, scheduledAt: new Date(ts).toISOString() };
 }
 
-// ─── Historique de sessions (stats globales) ─────────────────────────────────
+// ─── Historique de sessions (stats globales) ──────────────────────────────────
 const SESSIONS_FILE = path.join(__dirname, 'data', 'sessions.json');
 function loadSessions() {
   if (!fs.existsSync(SESSIONS_FILE)) return [];
@@ -214,6 +247,11 @@ if (fs.existsSync(CONFIG_FILE)) {
   try {
     const saved = JSON.parse(fs.readFileSync(CONFIG_FILE,'utf-8'));
     Object.assign(config, saved);
+    // FIX : valider la cohérence cross-champs au chargement depuis le disque
+    if (config.minDelay > config.maxDelay) config.maxDelay = config.minDelay;
+    if (config.sessionPauseMin > config.sessionPauseMax) config.sessionPauseMax = config.sessionPauseMin;
+    if (config.typingMin > config.typingMax) config.typingMax = config.typingMin;
+    if (config.linkDelayMin > config.linkDelayMax) config.linkDelayMax = config.linkDelayMin;
     if (saved.dailyLimit && typeof saved.dailyLimit === 'object') {
       for (const [id, val] of Object.entries(saved.dailyLimit)) dailyLimitMap[id] = parseInt(val);
     }
@@ -294,14 +332,13 @@ const EXPORT_GROUP_INTER_DELAY_MS = parseInt(process.env.EXPORT_GROUP_DELAY_MS |
 class BotAccount {
   constructor(id) {
     this.id         = id;
-    // FIX #9 : authPath via variable d'env pour compatibilité hors Docker
     this.authPath   = path.join(process.env.AUTH_PATH || '/app', '.wwebjs_auth', `account${id}`);
     this.dataFile   = path.join(__dirname, 'data', `queue_${id}.json`);
     this.client     = null;
     this.retryCount = 0;
     this._resumeTimer    = null;
     this._logFlushTimer  = null;
-    this._saveQueueTimer = null; // FIX #2 : debounce saveQueue
+    this._saveQueueTimer = null;
     this.state = {
       qr: null, ready: false, running: false, paused: false,
       queue: [], sessionCount: 0,
@@ -328,9 +365,6 @@ class BotAccount {
     }, LOG_FLUSH_DEBOUNCE_MS);
   }
 
-  // FIX #2 : _saveQueue avec debounce pour éviter 5000 écritures disque synchrones
-  // et risque de corruption JSON si le process est tué pendant une écriture.
-  // Les appels critiques (status=processing) peuvent forcer l'écriture immédiate.
   _saveQueue(immediate = false) {
     if (immediate) {
       if (this._saveQueueTimer) { clearTimeout(this._saveQueueTimer); this._saveQueueTimer = null; }
@@ -476,7 +510,6 @@ class BotAccount {
       const pending = this.state.queue.filter(c => c.status === 'pending').length;
       if (pending > 0 && !this.state.running && !this._dailyLimitReached()) {
         this.log(`▶️ Reprise automatique : ${pending} contacts restants`, 'warn');
-        // FIX #1 : passer le bot partenaire au lieu de undefined
         this.runQueue(this._partner);
       }
     });
@@ -572,6 +605,8 @@ class BotAccount {
     this.log(`🚀 Bot démarré (session ≤${config.sessionSize} msgs, limite/jour : ${this.dailyLimit})`,'success');
 
     while (this.state.queue.some(c => c.status === 'pending')) {
+      // FIX : vérifier running après chaque await long pour permettre un arrêt propre
+      if (!this.state.running) break;
       if (!this.state.ready) { await sleep(10000); continue; }
       if (this.state.paused)  { await sleep(3000);  continue; }
 
@@ -579,7 +614,6 @@ class BotAccount {
         this.state.running=false; this.state.limitReached=true; this.state.limitReachedAt=new Date().toISOString();
         const remaining=this.state.queue.filter(c=>c.status==='pending');
         const resetIn=this._windowResetIn();
-        // FIX #1 : utiliser this._partner comme fallback si relayBot absent
         const relay = relayBot || this._partner;
         if (relay && relay.state.ready && remaining.length>0) {
           this.log(`🔁 Limite ${this.dailyLimit} msgs atteinte → relais vers Compte ${relay.id} (${remaining.length} contacts)`,'warn');
@@ -599,16 +633,16 @@ class BotAccount {
         this._saveQueue(true); break;
       }
 
-      // FIX #7 : reset sessionCount à chaque nouvelle fenêtre 24h pour que
-      // les pauses de session se déclenchent correctement après relais/reprise
       if (this.state.sessionCount > 0 && this.state.sessionCount % config.sessionSize === 0) {
         this.log(`📊 Session ${Math.floor(this.state.sessionCount/config.sessionSize)} terminée`,'info');
         await this._delaySession();
+        // FIX : sortir de la boucle si le bot a été stoppé pendant la pause session
+        if (!this.state.running) break;
       }
 
       const contact=this.state.queue.find(c=>c.status==='pending');
       if (!contact) break;
-      contact.status='processing'; this._saveQueue(true); // écriture immédiate pour le statut processing
+      contact.status='processing'; this._saveQueue(true);
 
       try {
         const number=contact.phone.replace(/\D/g,''), chatId=`${number}@c.us`;
@@ -633,11 +667,14 @@ class BotAccount {
         addToSentHistory(number, { sentAt: contact.sentAt, botId: this.id, message: rawMsg, prenom: contact.prenom, nom: contact.nom });
         this._saveQueue();
         await this._delayMsg();
+        // FIX : sortir de la boucle si le bot a été stoppé pendant le délai inter-messages
+        if (!this.state.running) break;
       } catch(err) {
         if (this._detectBan(err.message)) { contact.status='pending'; this._handleBan(err); break; }
         contact.status='failed'; this.state.stats.failed++;
         this.log(`❌ Erreur ${contact.phone} : ${err.message}`,'error');
         this._saveQueue(); await sleep(rand(30000,60000));
+        if (!this.state.running) break;
       }
     }
 
@@ -742,7 +779,6 @@ class BotAccount {
 // ─── Deux comptes ─────────────────────────────────────────────────────────────
 const bots={1:new BotAccount(1),2:new BotAccount(2)};
 
-// FIX #1 : chaque bot connaît son partenaire pour le relais automatique au reconnect
 bots[1]._partner = bots[2];
 bots[2]._partner = bots[1];
 
@@ -765,7 +801,14 @@ app.post('/api/:account/start', (req,res)=>{
   b.state.paused=false; b.state.limitReached=false; b.state.bannedAt=null;
   cancelSchedule(b.id); b.runQueue(otherBot(b)); res.json({ok:true});
 });
-app.post('/api/:account/pause', (req,res)=>{ const b=requireBot(req,res); if(!b) return; b.state.paused=!b.state.paused; b.log(b.state.paused?'⏸️ Pause':'▶️ Reprise','warn'); res.json({ok:true,paused:b.state.paused}); });
+// FIX : /api/:account/pause annule aussi le planning si actif
+app.post('/api/:account/pause', (req,res)=>{
+  const b=requireBot(req,res); if(!b) return;
+  b.state.paused=!b.state.paused;
+  if (b.state.paused) cancelSchedule(b.id);
+  b.log(b.state.paused?'⏸️ Pause (planning annulé si actif)':'▶️ Reprise','warn');
+  res.json({ok:true,paused:b.state.paused});
+});
 app.post('/api/:account/clear', (req,res)=>{ const b=requireBot(req,res); if(!b) return; cancelSchedule(b.id); b.clear(); res.json({ok:true}); });
 app.post('/api/:account/reset', (req,res)=>{ const b=requireBot(req,res); if(!b) return; cancelSchedule(b.id); b.reset(); res.json({ok:true}); });
 
@@ -859,8 +902,6 @@ app.get('/api/:account/export', (req,res)=>{
 app.post('/api/:account/import', upload.single('file'), (req,res)=>{
   const bot=requireBot(req,res); if(!bot) return;
   if (!req.file) return res.status(400).json({ok:false,error:'Fichier manquant'});
-  // FIX #6 : parser forceInclude une seule fois avant le try pour éviter
-  // un JSON.parse hors try qui pourrait throw après que la réponse soit déjà envoyée
   let forceInclude;
   try { forceInclude = JSON.parse(req.body.forceInclude||'[]'); }
   catch(_) { forceInclude = []; }
@@ -904,7 +945,7 @@ app.post('/api/blacklist/add', (req,res)=>{
   const phone=(req.body.phone||'').replace(/\D/g,'');
   if(!phone||phone.length<8) return res.status(400).json({ok:false,error:'Numéro invalide'});
   const list=loadBlacklist();
-  if(!list.includes(phone)){list.push(phone);saveBlacklist(list);}
+  if(!list.some(p=>p.replace(/\D/g,'')=== phone)){list.push(phone);saveBlacklist(list);}
   res.json({ok:true,phone,total:list.length});
 });
 app.post('/api/blacklist/remove', (req,res)=>{
@@ -922,7 +963,7 @@ app.post('/api/blacklist/import', upload.single('file'), (req,res)=>{
     const list=loadBlacklist();
     for(const row of records){
       const phone=(row.telephone||row.phone||Object.values(row)[0]||'').replace(/\D/g,'');
-      if(phone&&phone.length>=8&&!list.includes(phone)){list.push(phone);added++;}
+      if(phone&&phone.length>=8&&!list.some(p=>p.replace(/\D/g,'')=== phone)){list.push(phone);added++;}
     }
     saveBlacklist(list); total=list.length;
   } catch(e){
@@ -964,8 +1005,6 @@ app.post('/api/config', (req, res) => {
   res.json({ ok: true, config });
 });
 
-// FIX #3 : try/catch sur getChats() pour éviter un crash si le client se déconnecte
-// entre le check ready et l'appel
 app.get('/api/:account/groups', async (req,res)=>{
   const bot=requireBot(req,res); if(!bot) return;
   if(!bot.state.ready) return res.json([]);
@@ -978,8 +1017,7 @@ app.get('/api/:account/groups', async (req,res)=>{
   }
 });
 
-// FIX #3 + #4 : try/catch sur getChats() + vérification res.writableEnded dans la boucle
-// pour éviter de continuer l'export si le client HTTP a fermé la connexion
+// FIX : export-group en streaming CSV pour éviter le timeout HTTP sur les grands groupes
 app.get('/api/:account/export-group/:name', async (req, res) => {
   const bot = requireBot(req, res); if (!bot) return;
   if (!bot.state.ready) return res.status(400).json({ ok: false, error: 'Non connecté' });
@@ -997,12 +1035,15 @@ app.get('/api/:account/export-group/:name', async (req, res) => {
 
   const participants = group.participants || [];
   const total        = participants.length;
-  const rows         = [];
 
   console.log(`[export-group] 📤 "${groupName}" — ${total} participants`);
 
+  // Streaming : envoyer les headers immédiatement pour éviter le timeout navigateur
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(groupName)}.csv"`);
+  res.write('telephone,prenom,nom,admin\n');
+
   for (let i = 0; i < participants.length; i++) {
-    // FIX #4 : arrêter la boucle si le client a fermé la connexion HTTP
     if (res.writableEnded) {
       console.log(`[export-group] ⚠️ Connexion client fermée à ${i}/${total}, export annulé`);
       return;
@@ -1010,14 +1051,14 @@ app.get('/api/:account/export-group/:name', async (req, res) => {
     const p = participants[i];
     if (i > 0 && i % 25 === 0) console.log(`[export-group] ⏳ ${i}/${total} traités...`);
     const { prenom, nom } = await getContactName(bot.client, p.id.user);
-    rows.push({ telephone: `+${p.id.user}`, prenom, nom, admin: p.isAdmin ? 'Oui' : 'Non' });
+    // Échapper les virgules/guillemets pour le CSV
+    const esc = v => `"${(v||'').replace(/"/g,'""')}"`;
+    res.write(`+${p.id.user},${esc(prenom)},${esc(nom)},${p.isAdmin?'Oui':'Non'}\n`);
     if (i < participants.length - 1) await sleep(EXPORT_GROUP_INTER_DELAY_MS);
   }
 
-  console.log(`[export-group] ✅ ${rows.length}/${total} contacts exportés`);
-  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-  res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(groupName)}.csv"`);
-  res.send(stringify(rows, { header: true }));
+  console.log(`[export-group] ✅ ${total} contacts exportés`);
+  res.end();
 });
 
 // ─── Routes legacy (Compte 1 uniquement) ─────────────────────────────────────
@@ -1028,10 +1069,11 @@ app.post('/api/start',(req,res)=>{
   cancelSchedule(bots[1].id);
   bots[1].runQueue(bots[2]); res.json({ok:true});
 });
+// FIX : /api/pause legacy annule aussi le planning si actif
 app.post('/api/pause',(req,res)=>{
-  cancelSchedule(bots[1].id);
   bots[1].state.paused=!bots[1].state.paused;
-  bots[1].log(bots[1].state.paused?'⏸️ Pause':'▶️ Reprise','warn');
+  if (bots[1].state.paused) cancelSchedule(bots[1].id);
+  bots[1].log(bots[1].state.paused?'⏸️ Pause (planning annulé si actif)':'▶️ Reprise','warn');
   res.json({ok:true,paused:bots[1].state.paused});
 });
 app.post('/api/clear',(req,res)=>{
