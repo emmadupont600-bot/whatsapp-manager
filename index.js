@@ -146,15 +146,7 @@ function recordSessionEnd(botId, stats) {
 }
 
 // ─── FIX #11 : persistance des logs sur disque ───────────────────────────────
-// Avant : state.log était un tableau en mémoire, limité à 200 entrées et
-// entièrement perdu au redémarrage du processus (crash, déploiement, OOM…).
-// Après :
-//   • loadLogs(id)  → lit data/logs_{id}.json au démarrage
-//   • saveLogs(id)  → écrit data/logs_{id}.json (max MAX_LOG_ENTRIES entrées)
-//   • _flushLogs()  → appelé depuis log() avec debounce 2 s pour ne pas écrire
-//                     sur disque à chaque message (hot path de la boucle d'envoi)
-//   • GET /api/:account/logs → expose les logs paginés (query: page, limit, type)
-const MAX_LOG_ENTRIES = 1000; // nombre max d'entrées conservées sur disque
+const MAX_LOG_ENTRIES = 1000;
 const LOG_FLUSH_DEBOUNCE_MS = 2000;
 
 function logFilePath(id) {
@@ -177,7 +169,6 @@ function saveLogs(id, entries) {
 }
 
 // ─── Config par défaut ───────────────────────────────────────────────────────
-// FIX #10 : dailyLimit n'est plus un objet figé {1: N, 2: N}.
 const DEFAULT_DAILY_LIMIT = parseInt(process.env.DAILY_LIMIT || '300');
 const _dailyLimitOverrides = {};
 const dailyLimitMap = new Proxy(_dailyLimitOverrides, {
@@ -264,7 +255,7 @@ class BotAccount {
     this.client     = null;
     this.retryCount = 0;
     this._resumeTimer   = null;
-    this._logFlushTimer = null; // FIX #11 : timer debounce pour flush logs
+    this._logFlushTimer = null;
     this._starting  = false;
     this.state = {
       qr: null, ready: false, running: false, paused: false,
@@ -276,7 +267,6 @@ class BotAccount {
       resumeAt: null,
       bannedAt: null,
       repliesReceived: 0,
-      // FIX #11 : logs chargés depuis le disque au démarrage (plus de perte au crash)
       log: loadLogs(id),
       stats: { sent: 0, failed: 0, skipped: 0, blacklisted: 0 }
     };
@@ -287,11 +277,8 @@ class BotAccount {
 
   get dailyLimit() { return dailyLimitMap[this.id]; }
 
-  // FIX #11 : _flushLogs() écrit state.log sur disque avec un debounce de 2 s
-  // pour éviter un appel fs.writeFileSync à chaque log (peut arriver plusieurs
-  // fois par seconde pendant la boucle d'envoi).
   _flushLogs() {
-    if (this._logFlushTimer) return; // flush déjà planifié
+    if (this._logFlushTimer) return;
     this._logFlushTimer = setTimeout(() => {
       this._logFlushTimer = null;
       saveLogs(this.id, this.state.log);
@@ -340,12 +327,10 @@ class BotAccount {
   log(msg, type = 'info') {
     const entry = { time: new Date().toISOString(), msg, type };
     this.state.log.unshift(entry);
-    // Garde les MAX_LOG_ENTRIES entrées les plus récentes en mémoire
     if (this.state.log.length > MAX_LOG_ENTRIES) {
       this.state.log = this.state.log.slice(0, MAX_LOG_ENTRIES);
     }
     console.log(`[BOT${this.id}][${type.toUpperCase()}] ${msg}`);
-    // FIX #11 : planifie la persistance sur disque (debounce 2 s)
     this._flushLogs();
   }
 
@@ -488,22 +473,73 @@ class BotAccount {
   async _delaySession() { const ms=rand(config.sessionPauseMin,config.sessionPauseMax)*1000; this.log(`☕ Pause session : ${(ms/60000).toFixed(0)}min`,'warn'); await sleep(ms); }
   async _typing(chat) { try { await chat.sendStateTyping(); await sleep(rand(config.typingMin,config.typingMax)); await chat.clearState(); } catch(e) {} }
 
+  // ─── FIX : _sendMessage robuste ──────────────────────────────────────────
+  // AVANT : sendMessage() était appelé sans vérifier son retour. La lib
+  // whatsapp-web.js ne lève pas d'exception si la session est dégradée —
+  // elle retourne simplement un objet Message vide ou null, ce qui faisait
+  // afficher "✅ Envoyé" dans les logs alors que le message n'était jamais
+  // arrivé côté WhatsApp.
+  //
+  // APRÈS :
+  //  1. La valeur de retour de sendMessage() est capturée dans `sent`.
+  //  2. Si `sent` est falsy ou n'a pas de `id._serialized`, une vraie Error
+  //     est levée → runQueue() la catch et marque le contact 'failed' au
+  //     lieu de 'done', ce qui empêche le faux "✅".
+  //  3. Cas url-seule : si splitMessageAndLink() trouve une URL mais que
+  //     parts.text est vide (message = URL pure), on envoie l'URL telle
+  //     quelle en un seul sendMessage() plutôt qu'une chaîne vide + URL.
+  //  4. L'id WA du message est retourné pour être loggé dans runQueue().
   async _sendMessage(chatId, rawMsg, link) {
     const chat = await this.client.getChatById(chatId);
+
+    // Vérifie qu'un Message retourné par sendMessage() est valide.
+    const assertSent = (msg, label) => {
+      if (!msg || !msg.id || !msg.id._serialized) {
+        throw new Error(`sendMessage() n'a pas retourné d'accusé de réception WhatsApp (${label}). Session peut-être expirée.`);
+      }
+      return msg.id._serialized;
+    };
+
     if (link && link.trim()) {
-      await this._typing(chat); await this.client.sendMessage(chatId, rawMsg.trim());
-      const delay=rand(config.linkDelayMin,config.linkDelayMax); this.log(`⏱ Délai avant lien : ${(delay/1000).toFixed(1)}s`,'info');
-      await sleep(delay); await this.client.sendMessage(chatId, link.trim());
-    } else {
-      const parts = splitMessageAndLink(rawMsg);
-      if (parts && parts.text) {
-        await this._typing(chat); await this.client.sendMessage(chatId, parts.text);
-        const delay=rand(config.linkDelayMin,config.linkDelayMax); await sleep(delay);
-        await this.client.sendMessage(chatId, parts.url);
+      // Cas nominal : texte + lien fournis séparément via le champ "link"
+      await this._typing(chat);
+      const sentText = await this.client.sendMessage(chatId, rawMsg.trim());
+      assertSent(sentText, 'texte');
+      const delay = rand(config.linkDelayMin, config.linkDelayMax);
+      this.log(`⏱ Délai avant lien : ${(delay/1000).toFixed(1)}s`, 'info');
+      await sleep(delay);
+      const sentLink = await this.client.sendMessage(chatId, link.trim());
+      assertSent(sentLink, 'lien');
+      return assertSent(sentLink, 'lien'); // retourne l'id du dernier msg
+    }
+
+    const parts = splitMessageAndLink(rawMsg);
+    if (parts) {
+      if (parts.text) {
+        // Lien détecté à l'intérieur du texte : envoie texte puis URL séparément
+        await this._typing(chat);
+        const sentText = await this.client.sendMessage(chatId, parts.text);
+        assertSent(sentText, 'texte');
+        const delay = rand(config.linkDelayMin, config.linkDelayMax);
+        await sleep(delay);
+        const sentLink = await this.client.sendMessage(chatId, parts.url);
+        assertSent(sentLink, 'lien');
+        return assertSent(sentLink, 'lien');
       } else {
-        await this._typing(chat); await this.client.sendMessage(chatId, rawMsg);
+        // FIX : message = URL pure (pas de texte autour) → envoie l'URL seule
+        // Avant : on envoyait '' (chaîne vide) puis l'URL → le 1er message
+        // était vide et pouvait être refusé silencieusement par WA.
+        await this._typing(chat);
+        const sentLink = await this.client.sendMessage(chatId, parts.url);
+        assertSent(sentLink, 'url-seule');
+        return assertSent(sentLink, 'url-seule');
       }
     }
+
+    // Cas simple : texte sans lien
+    await this._typing(chat);
+    const sent = await this.client.sendMessage(chatId, rawMsg);
+    return assertSent(sent, 'texte-simple');
   }
 
   async sendTest(phone, message, link) {
@@ -514,8 +550,9 @@ class BotAccount {
     const fakeContact={phone:number,prenom:'Test',nom:'Test'};
     const rawMsg=personalizeMessage(message||'Message de test 👋',fakeContact);
     const rawLink=personalizeMessage(link||'',fakeContact);
-    await this._sendMessage(chatId,rawMsg,rawLink);
-    this.log(`🧪 Message de test envoyé à +${number}`,'success');
+    // _sendMessage() lève une vraie Error si l'envoi échoue silencieusement
+    const msgId = await this._sendMessage(chatId,rawMsg,rawLink);
+    this.log(`🧪 Message de test envoyé à +${number} [id: ${msgId}]`,'success');
   }
 
   async runQueue(relayBot) {
@@ -585,10 +622,14 @@ class BotAccount {
         const personalizedLink=personalizeMessage(link,contact);
 
         this._recordFirstSend();
-        await this._sendMessage(chatId,rawMsg,personalizedLink);
+        // _sendMessage() lève maintenant une vraie Error si WA ne confirme
+        // pas la réception → le catch ci-dessous marquera 'failed' au lieu
+        // de laisser passer un faux '✅ Envoyé'
+        const msgId = await this._sendMessage(chatId,rawMsg,personalizedLink);
         contact.status='done'; contact.sentAt=new Date().toISOString();
+        contact.waMessageId = msgId; // stocke l'id WA pour audit
         this.state.stats.sent++; this.state.sessionCount++; this.state.dailySent++;
-        this.log(`✅ Envoyé à +${number}${contact.prenom?' ('+contact.prenom+')':''}${link?' 🔗':''} [${this.state.dailySent}/${this.dailyLimit}]`,'success');
+        this.log(`✅ Envoyé à +${number}${contact.prenom?' ('+contact.prenom+')':''}${link?' 🔗':''} [${this.state.dailySent}/${this.dailyLimit}] id:${msgId}`,'success');
 
         addToSentHistory(number, { sentAt: contact.sentAt, botId: this.id, message: rawMsg, prenom: contact.prenom, nom: contact.nom });
 
@@ -703,7 +744,6 @@ class BotAccount {
     this._saveQueue(); this.log('🗑️ Queue vidée','warn');
   }
 
-  // FIX #11 : efface les logs en mémoire ET sur disque
   clearLogs() {
     this.state.log = [];
     saveLogs(this.id, []);
@@ -769,11 +809,6 @@ app.post('/api/:account/test-message', async(req,res)=>{
   } catch(e){res.status(400).json({ok:false,error:e.message});}
 });
 
-// FIX #11 : nouvelle route GET /api/:account/logs
-// Paramètres query :
-//   page  (défaut 1)  — pagination
-//   limit (défaut 100, max 500)
-//   type  (optionnel) — filtre sur le champ type : info | warn | error | success
 app.get('/api/:account/logs', (req,res)=>{
   const b=requireBot(req,res); if(!b) return;
   const { page=1, limit=100, type='' } = req.query;
@@ -785,7 +820,6 @@ app.get('/api/:account/logs', (req,res)=>{
   res.json({ total, page: parseInt(page), perPage, items: entries.slice(start, start+perPage) });
 });
 
-// FIX #11 : DELETE /api/:account/logs — efface les logs du bot (mémoire + disque)
 app.delete('/api/:account/logs', (req,res)=>{
   const b=requireBot(req,res); if(!b) return;
   b.clearLogs();
@@ -820,7 +854,7 @@ app.get('/api/:account/export', (req,res)=>{
   let items=bot.state.queue;
   if(status==='replied') items=items.filter(c=>c.replied===true);
   else if(status) items=items.filter(c=>c.status===status);
-  const rows=items.map(c=>({telephone:c.phone,prenom:c.prenom||'',nom:c.nom||'',statut:c.status,replied:c.replied?'Oui':'Non',reply_text:c.replyText||'',message:c.message,link:c.link||'',ajoute_le:c.addedAt,envoye_le:c.sentAt||''}));
+  const rows=items.map(c=>({telephone:c.phone,prenom:c.prenom||'',nom:c.nom||'',statut:c.status,replied:c.replied?'Oui':'Non',reply_text:c.replyText||'',message:c.message,link:c.link||'',ajoute_le:c.addedAt,envoye_le:c.sentAt||'',wa_message_id:c.waMessageId||''}));
   const suffix=status?'_'+status:'';
   res.setHeader('Content-Type','text/csv');
   res.setHeader('Content-Disposition',`attachment; filename="export_bot${bot.id}${suffix}.csv"`);
