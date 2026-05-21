@@ -173,6 +173,11 @@ class BotAccount {
     this.client     = null;
     this.retryCount = 0;
     this._resumeTimer = null;
+    // FIX #2 : verrou atomique pour éviter la race condition dans runQueue.
+    // _starting passe à true dès l'entrée dans runQueue et revient à false
+    // une fois this.state.running=true établi, empêchant tout double démarrage
+    // même entre deux await (sleep, isRegisteredUser, etc.)
+    this._starting  = false;
     this.state = {
       qr: null, ready: false, running: false, paused: false,
       queue: [], sessionCount: 0,
@@ -407,9 +412,19 @@ class BotAccount {
     this.log(`🧪 Message de test envoyé à +${number}`,'success');
   }
 
+  // FIX #2 : protection contre la race condition.
+  // Avant ce fix, deux appels rapprochés à runQueue() pouvaient tous les deux
+  // passer le check `if (this.state.running) return` car JavaScript est
+  // single-threadé mais cède le contrôle à chaque `await`. Le flag `_starting`
+  // est positionné de façon synchrone dès l'entrée dans la méthode, avant tout
+  // await, ce qui garantit qu'un second appel concurrent est rejeté.
   async runQueue(relayBot) {
-    if (this.state.running) return;
-    this.state.running = true; this.state.limitReached = false;
+    if (this.state.running || this._starting) return;
+    this._starting = true;
+    this.state.running = true;
+    this._starting = false;
+
+    this.state.limitReached = false;
     const startStats={...this.state.stats}, startTime=Date.now();
     this.log(`🚀 Bot démarré (session ≤${config.sessionSize} msgs, limite/jour : ${this.dailyLimit})`,'success');
 
