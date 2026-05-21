@@ -980,6 +980,10 @@ async function sendAndVerify(client, chatId, text, label, logger, chatForTyping 
   const msg = await deliverOutboundMessage(client, sendChatId, text, label, chatForTyping, logger);
   let msgId = whatsappMsgId(msg);
   let ackLevel = null;
+  let verifyChat = chatForTyping;
+  if (!verifyChat) {
+    try { verifyChat = await withTimeout(client.getChatById(sendChatId), 10000, 'getChat verify'); } catch (_) {}
+  }
   if (!msgId) {
     if (logger) logger(`⚠️ sendMessage(${label}) sans id — vérification via fetchMessages...`, 'warn');
     let vChat = chatForTyping;
@@ -1012,10 +1016,6 @@ async function sendAndVerify(client, chatId, text, label, logger, chatForTyping 
     if (logger) logger(`⚠️ ${ackErr.message} — vérif historique...`, 'warn');
   }
   const ackOk = ackLevel !== null && ackLevel >= MessageAck.ACK_SERVER;
-  let verifyChat = chatForTyping;
-  if (!verifyChat) {
-    try { verifyChat = await withTimeout(client.getChatById(sendChatId), 10000, 'getChat verify'); } catch (_) {}
-  }
   if (verifyChat) {
     try {
       await verifyMessageInChat(verifyChat, text, msgId, label, { softFail: ackOk, logger });
