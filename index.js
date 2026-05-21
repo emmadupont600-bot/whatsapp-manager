@@ -619,9 +619,95 @@ async function openChatViaStore(client, phoneDigits, logger) {
   }
 }
 
+
+async function sendTextViaWhatsAppStore(client, phoneDigits, text, logger, label) {
+  const page = client.pupPage;
+  if (!page || process.env.STORE_SEND === '0') return null;
+  const phone = String(phoneDigits).replace(/\D/g, '');
+  const body = (text || '').trim();
+  if (!body) return null;
+
+  const result = await withTimeout(
+    page.evaluate(async (ph, msg) => {
+      const out = { ok: false, err: null, id: null, via: null, tries: [] };
+      try {
+        const WidFactory = window.require('WAWebWidFactory');
+        const FindChat = window.require('WAWebFindChatAction');
+        const cusWid = WidFactory.createWid(ph + '@c.us');
+        let chat = (await FindChat.findOrCreateLatestChat(cusWid).catch(() => null))?.chat;
+        if (!chat) {
+          out.err = 'no_chat';
+          return out;
+        }
+        try {
+          const Open = window.require('WAWebOpenChatAction') || window.require('WAWebChatAction');
+          if (Open?.openChatBottom) await Open.openChatBottom(chat);
+        } catch (_) {}
+
+        const attempt = async (name, fn) => {
+          try {
+            const m = await fn();
+            const id = m?.id?._serialized || m?.id?.id || (typeof m?.id === 'string' ? m.id : null);
+            out.tries.push({ name, id: id || null });
+            if (id) return { name, id };
+          } catch (e) {
+            out.tries.push({ name, err: e.message || String(e) });
+          }
+          return null;
+        };
+
+        const SendAction = window.require('WAWebSendMsgChatAction');
+        if (SendAction) {
+          let r = await attempt('sendTextMsgToChat', () => SendAction.sendTextMsgToChat(chat, msg, {}));
+          if (!r && SendAction.sendMsg) {
+            r = await attempt('sendMsg', () => SendAction.sendMsg(chat, msg, {}));
+          }
+          if (r) { out.ok = true; out.via = r.name; out.id = r.id; return out; }
+        }
+
+        const AddSend = window.require('WAWebAddAndSendMsgToChat');
+        if (AddSend?.addAndSendMsgToChat) {
+          const r = await attempt('addAndSendMsgToChat', () =>
+            AddSend.addAndSendMsgToChat(chat, { body: msg, type: 'chat' }, {})
+          );
+          if (r) { out.ok = true; out.via = r.name; out.id = r.id; return out; }
+        }
+
+        const Front = window.require('WAWebFrontendMsgSendActions');
+        if (Front?.sendTextMsgToChat) {
+          const r = await attempt('frontendSend', () => Front.sendTextMsgToChat(chat, msg));
+          if (r) { out.ok = true; out.via = r.name; out.id = r.id; return out; }
+        }
+
+        out.err = 'no_send_module';
+        return out;
+      } catch (e) {
+        out.err = e.message || String(e);
+        return out;
+      }
+    }, phone, body),
+    35000,
+    'sendTextViaWhatsAppStore'
+  );
+
+  if (!result?.ok || !result.id) {
+    if (logger) logger(`⚠️ Module WA (${label}) : ${result?.err || 'pas d\'id'}`, 'warn');
+    return null;
+  }
+  if (logger) logger(`📤 Message via ${result.via} (${label})`, 'info');
+  return { id: result.id, viaStore: true };
+}
+
+function isHeyLikeLabel(label) {
+  return /hey|opener/i.test(label || '');
+}
+
 async function sendTextViaComposerUI(client, cusChatId, text, logger, label) {
   const page = client.pupPage;
   if (!page) return false;
+  try {
+    await page.waitForSelector('footer div[contenteditable="true"], div[contenteditable="true"][data-tab="10"]', { timeout: 15000 });
+  } catch (_) {}
   const selectors = [
     'footer div[contenteditable="true"][data-tab="10"]',
     '#main footer div[contenteditable="true"][role="textbox"]',
@@ -647,7 +733,7 @@ async function sendTextViaComposerUI(client, cusChatId, text, logger, label) {
       await sleep(3500);
       try {
         const chat = await withTimeout(client.getChatById(cusChatId), 12000, 'verify UI send');
-        await verifyMessageInChat(chat, text, null, label, { strict: true, maxAgeMs: 35000, logger });
+        await verifyMessageInChat(chat, text, null, label, { strict: !isHeyLikeLabel(label), maxAgeMs: 60000, logger });
         if (logger) logger(`✔️ Message UI confirmé dans le chat (${label})`, 'info');
         return true;
       } catch (verr) {
@@ -996,18 +1082,42 @@ async function deliverOutboundMessage(client, sendChatId, text, label, chatObj, 
 async function sendSingleOutbound(client, chatId, text, label, logger, prefetchedChat, opts = {}) {
   const pn = chatId.split('@')[0].replace(/\D/g, '');
   const cusId = normalizeOutboundChatId(chatId, pn);
-  const wantUi = process.env.UI_SEND_OPENER !== '0' && (
+  const wantAlt = process.env.UI_SEND_OPENER !== '0' && (
     useUiSendAll() || opts.viaUi || opts.manualOpener || opts.forceUi ||
     /hey|ui-retry/i.test(label)
   );
 
+  const tryStoreSend = async (stepLabel) => {
+    if (!client.pupPage) return null;
+    await openChatViaStore(client, pn, logger);
+    const sent = await sendTextViaWhatsAppStore(client, pn, text, logger, stepLabel);
+    if (!sent?.id) return null;
+    try {
+      const ack = await waitForMessageAck(client, sent.id, stepLabel);
+      const chat = await withTimeout(client.getChatById(cusId), 12000, 'verify store send');
+      await verifyMessageInChat(chat, text, sent.id, stepLabel, {
+        strict: !isHeyLikeLabel(stepLabel),
+        maxAgeMs: 90000,
+        logger
+      });
+      if (logger) logger(`✔️ ACK ${stepLabel} via module WA (niveau ${ack})`, 'success');
+      return { id: sent.id, verified: true, viaStore: true };
+    } catch (e) {
+      if (logger) logger(`❌ Module WA (${stepLabel}) : ${e.message}`, 'error');
+      return null;
+    }
+  };
+
   const tryUi = async (stepLabel) => {
-    if (!wantUi || !client.pupPage) return null;
+    if (!wantAlt || !client.pupPage) return null;
     await openChatViaStore(client, pn, logger);
     const uiOk = await sendTextViaComposerUI(client, cusId, text, logger, stepLabel);
     if (uiOk) return { id: 'ui-verified', verified: true, viaUi: true };
     return null;
   };
+
+  const storeFirst = await tryStoreSend(label);
+  if (storeFirst) return storeFirst;
 
   const uiFirst = await tryUi(label);
   if (uiFirst) {
@@ -1020,7 +1130,12 @@ async function sendSingleOutbound(client, chatId, text, label, logger, prefetche
     return await sendAndVerify(client, chatId, text, label, logger, prefetchedChat, pn, opts);
   } catch (e) {
     if (/rejeté|ACK_ERROR/i.test(e.message) && client.pupPage && process.env.UI_RETRY_ON_ACK !== '0') {
-      if (logger) logger(`🔁 ACK_ERROR API → retry saisie clavier (${label})`, 'warn');
+      if (logger) logger(`🔁 ACK_ERROR API → retry module WA puis clavier (${label})`, 'warn');
+      const storeRetry = await tryStoreSend(`${label}-store-retry`);
+      if (storeRetry) {
+        if (logger) logger(`✔️ Livré après retry module WA (${label})`, 'success');
+        return storeRetry;
+      }
       const uiRetry = await tryUi(`${label}-ui-retry`);
       if (uiRetry) {
         if (logger) logger(`✔️ Livré après retry UI (${label})`, 'success');
@@ -1602,20 +1717,10 @@ class BotAccount {
     let result;
     const sendId = cusChatId;
     if (openerText) {
-      let openerResult;
-      if (process.env.UI_SEND_OPENER !== '0') {
-        await openChatViaStore(this.client, number, this.log.bind(this));
-        const uiHey = await sendTextViaComposerUI(this.client, sendId, openerText, this.log.bind(this), 'hey');
-        if (uiHey) {
-          this.log('✅ Hey confirmé dans le chat (saisie clavier)', 'success');
-          openerResult = { messageCount: 1, ids: ['ui-verified'], lastId: 'ui-verified' };
-        } else {
-          this.log('⚠️ Hey : saisie UI non confirmée — essai API', 'warn');
-          openerResult = await this._sendMessage(sendId, openerText, '', prefetchedChat, { ...sendOpts, manualOpener: true, forceUi: true });
-        }
-      } else {
-        openerResult = await this._sendMessage(sendId, openerText, '', prefetchedChat, sendOpts);
-      }
+      this.log(`👋 Envoi Hey (${openerText})...`, 'info');
+      const openerResult = await this._sendMessage(sendId, openerText, '', prefetchedChat, {
+        ...sendOpts, manualOpener: true, forceUi: true
+      });
       await sleep(COLD_OPENER_DELAY_MS);
       if (splitRoute) {
         const textOnly = personalizeMessage((message ?? contact.message ?? '').trim() || process.env.DEFAULT_MESSAGE || '', contact);
@@ -1964,7 +2069,7 @@ app.get('/api/health', (req, res) => {
     ok: true,
     version: APP_VERSION,
     commit: BUILD_COMMIT,
-    features: { resetAuth: true, ghostDetection: true, messageAck: true, combinedLinkMessage: !useSplitLinkMessages(), coldContactSync: true, manualSearchFlow: true, coldOpener: true, ackColdSoft: false, manualSearchDom: true, manualRouteSplit: true, uiSendAll: true, uiRetryOnAck: true },
+    features: { resetAuth: true, ghostDetection: true, messageAck: true, combinedLinkMessage: !useSplitLinkMessages(), coldContactSync: true, manualSearchFlow: true, coldOpener: true, ackColdSoft: false, manualSearchDom: true, manualRouteSplit: true, uiSendAll: true, uiRetryOnAck: true, storeSend: true },
     resetAuthOnStart: [...RESET_AUTH_ON_START],
     uptimeSec: Math.round(process.uptime()),
   });
