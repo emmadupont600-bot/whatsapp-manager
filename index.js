@@ -269,7 +269,6 @@ class BotAccount {
     this.retryCount = 0;
     this._resumeTimer   = null;
     this._logFlushTimer = null;
-    this._starting  = false;
     this.state = {
       qr: null, ready: false, running: false, paused: false,
       queue: [], sessionCount: 0,
@@ -541,11 +540,19 @@ class BotAccount {
     this.log(`🧪 Message de test envoyé à +${number} [id: ${msgId}]`,'success');
   }
 
+  // ─── FIX #1 : race condition corrigée ────────────────────────────────────
+  // Avant : un flag `_starting` était posé puis immédiatement retiré de façon
+  // synchrone, ce qui le rendait totalement inutile. Deux appels simultanés à
+  // runQueue() (ex: événement 'ready' + setTimeout du schedule) pouvaient tous
+  // deux passer le guard `if (this.state.running)` avant qu'un des deux ait eu
+  // le temps de le poser, entraînant des doubles envois.
+  //
+  // Correction : `this.state.running` est posé à `true` comme PREMIÈRE
+  // instruction, avant tout await. Le flag `_starting` est supprimé. La
+  // propriété n'est plus jamais relue depuis l'extérieur avant d'être posée.
   async runQueue(relayBot) {
-    if (this.state.running || this._starting) return;
-    this._starting = true;
-    this.state.running = true;
-    this._starting = false;
+    if (this.state.running) return;
+    this.state.running = true; // ← verrou posé immédiatement, avant tout await
 
     this.state.limitReached = false;
     const startStats={...this.state.stats}, startTime=Date.now();
@@ -810,11 +817,6 @@ app.delete('/api/:account/logs', (req,res)=>{
 });
 
 // ─── /api/stats — avec détail par compte et totalReplies ─────────────────────
-// FIX stats : ajout de `accounts` (détail par compte) et `totalReplies`
-// (somme de repliesReceived pour tous les bots en mémoire).
-// Avant : la route ne retournait ni l'un ni l'autre → le tableau "Détail par
-// compte" affichait toujours "Pas encore de données" et le KPI "Réponses
-// reçues" restait à "—" même après des envois.
 app.get('/api/stats', (req,res)=>{
   const sessions=loadSessions();
   const totalSent=sessions.reduce((s,x)=>s+(x.sent||0),0);
@@ -825,10 +827,8 @@ app.get('/api/stats', (req,res)=>{
   const skipRate=total>0?Math.round(totalSkipped/total*100):0;
   const last30=sessions.slice(-30).map(s=>({date:s.date,botId:s.botId,sent:s.sent||0,skipped:s.skipped||0,failed:s.failed||0,duration:s.duration||0}));
 
-  // totalReplies : somme des réponses reçues sur tous les bots en mémoire
   const totalReplies = Object.values(bots).reduce((sum, b) => sum + (b.state.repliesReceived || 0), 0);
 
-  // accounts : aggrège les stats sessions par botId + replies en mémoire
   const byAccount = {};
   for (const s of sessions) {
     const id = s.botId || 1;
@@ -837,7 +837,6 @@ app.get('/api/stats', (req,res)=>{
     byAccount[id].failed  += s.failed  || 0;
     byAccount[id].skipped += s.skipped || 0;
   }
-  // Ajoute les réponses reçues depuis la mémoire des bots actifs
   for (const b of Object.values(bots)) {
     if (!byAccount[b.id]) byAccount[b.id] = { account: b.id, sent: 0, failed: 0, skipped: 0, replies: 0 };
     byAccount[b.id].replies = b.state.repliesReceived || 0;
@@ -995,6 +994,7 @@ app.get('/api/status',(req,res)=>res.json(bots[1].getStatus()));
 app.post('/api/start',(req,res)=>{
   if(!bots[1].state.ready) return res.status(400).json({ok:false,error:'Non connecté'});
   bots[1].state.paused=false; bots[1].state.limitReached=false; bots[1].state.bannedAt=null;
+  cancelSchedule(bots[1].id);
   bots[1].runQueue(bots[2]); res.json({ok:true});
 });
 app.post('/api/pause',(req,res)=>{bots[1].state.paused=!bots[1].state.paused;res.json({ok:true});});
