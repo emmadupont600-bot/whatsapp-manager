@@ -174,9 +174,6 @@ class BotAccount {
     this.retryCount = 0;
     this._resumeTimer = null;
     // FIX #2 : verrou atomique pour éviter la race condition dans runQueue.
-    // _starting passe à true dès l'entrée dans runQueue et revient à false
-    // une fois this.state.running=true établi, empêchant tout double démarrage
-    // même entre deux await (sleep, isRegisteredUser, etc.)
     this._starting  = false;
     this.state = {
       qr: null, ready: false, running: false, paused: false,
@@ -412,12 +409,7 @@ class BotAccount {
     this.log(`🧪 Message de test envoyé à +${number}`,'success');
   }
 
-  // FIX #2 : protection contre la race condition.
-  // Avant ce fix, deux appels rapprochés à runQueue() pouvaient tous les deux
-  // passer le check `if (this.state.running) return` car JavaScript est
-  // single-threadé mais cède le contrôle à chaque `await`. Le flag `_starting`
-  // est positionné de façon synchrone dès l'entrée dans la méthode, avant tout
-  // await, ce qui garantit qu'un second appel concurrent est rejeté.
+  // FIX #2 : protection contre la race condition via flag atomique _starting.
   async runQueue(relayBot) {
     if (this.state.running || this._starting) return;
     this._starting = true;
@@ -490,7 +482,6 @@ class BotAccount {
         this.state.stats.sent++; this.state.sessionCount++; this.state.dailySent++;
         this.log(`✅ Envoyé à +${number}${contact.prenom?' ('+contact.prenom+')':''}${link?' 🔗':''} [${this.state.dailySent}/${this.dailyLimit}]`,'success');
 
-        // Enregistrer dans l'historique global
         addToSentHistory(number, { sentAt: contact.sentAt, botId: this.id, message: rawMsg, prenom: contact.prenom, nom: contact.nom });
 
         this._saveQueue();
@@ -516,7 +507,6 @@ class BotAccount {
     this._saveQueue();
   }
 
-  // importCSV — retourne les doublons pour confirmation
   importCSV(content, defaultMessage, defaultLink, forceIncludeDuplicates = []) {
     const records = csv.parse(content, { columns: true, skip_empty_lines: true });
     let added=0, blacklisted=0, skippedQueue=0;
@@ -550,7 +540,6 @@ class BotAccount {
     return { added, blacklisted, skippedQueue, duplicates };
   }
 
-  // Supprimer un contact de la queue manuellement
   removeContact(phone) {
     const clean=phone.replace(/\D/g,'');
     const before=this.state.queue.length;
@@ -677,9 +666,7 @@ app.get('/api/:account/export', (req,res)=>{
   res.send(stringify(rows,{header:true}));
 });
 
-// Import avec détection de doublons (2 phases)
-// FIX #1 : le fichier uploadé est supprimé dans un bloc `finally` pour garantir
-// le nettoyage même en cas d'erreur (message vide, CSV invalide, exception…)
+// FIX #1 : fichier uploadé supprimé dans finally + guard req.file
 app.post('/api/:account/import', upload.single('file'), (req,res)=>{
   if (!req.file) return res.status(400).json({ok:false,error:'Fichier manquant'});
   let result;
@@ -702,13 +689,11 @@ app.post('/api/:account/import', upload.single('file'), (req,res)=>{
   }
 });
 
-// Supprimer un contact de la queue
 app.delete('/api/:account/queue/:phone', (req,res)=>{
   const removed=getBot(req).removeContact(req.params.phone);
   res.json({ok:true,removed});
 });
 
-// Historique global
 app.get('/api/sent-history', (req,res)=>{
   const hist=loadSentHistory();
   const list=Object.entries(hist).map(([phone,d])=>({phone,...d}));
@@ -727,7 +712,6 @@ app.delete('/api/sent-history', (req,res)=>{
   res.json({ok:true});
 });
 
-// Blacklist
 app.get('/api/blacklist', (req,res)=>res.json({list:loadBlacklist()}));
 app.post('/api/blacklist/add', (req,res)=>{
   const phone=(req.body.phone||'').replace(/\D/g,'');
@@ -742,7 +726,7 @@ app.post('/api/blacklist/remove', (req,res)=>{
   saveBlacklist(list); res.json({ok:true,total:list.length});
 });
 
-// FIX #1 : même correction pour /blacklist/import — finally garantit la suppression du fichier
+// FIX #1 : même correction pour /blacklist/import
 app.post('/api/blacklist/import', upload.single('file'), (req,res)=>{
   if (!req.file) return res.status(400).json({ok:false,error:'Fichier manquant'});
   let added=0, total=0;
@@ -764,7 +748,6 @@ app.post('/api/blacklist/import', upload.single('file'), (req,res)=>{
   res.json({ok:true,added,total});
 });
 
-// Config
 app.get('/api/config',(req,res)=>res.json(config));
 app.post('/api/config',(req,res)=>{
   const allowed=['minDelay','maxDelay','sessionSize','autoResume'];
@@ -772,7 +755,6 @@ app.post('/api/config',(req,res)=>{
   saveConfig(); res.json({ok:true,config});
 });
 
-// Groupes
 app.get('/api/:account/groups',async(req,res)=>{
   const bot=getBot(req); if(!bot.state.ready) return res.json([]);
   const chats=await bot.client.getChats();
@@ -795,8 +777,17 @@ app.get('/api/:account/export-group/:name',async(req,res)=>{
 });
 
 // Compat bot 1
+// FIX #4 : la route legacy /api/start ne vérifiait pas si le bot était connecté
+// avant de lancer runQueue, contrairement à la route /api/:account/start.
+// Sans ce check, appeler /api/start alors que le bot n'est pas prêt démarre
+// une boucle queue inutile qui échoue silencieusement sur chaque contact
+// (échec isRegisteredUser, sendMessage, etc.) et génère des erreurs en cascade.
 app.get('/api/status',(req,res)=>res.json(bots[1].getStatus()));
-app.post('/api/start',(req,res)=>{bots[1].state.paused=false;bots[1].runQueue(bots[2]);res.json({ok:true});});
+app.post('/api/start',(req,res)=>{
+  if(!bots[1].state.ready) return res.status(400).json({ok:false,error:'Non connecté'});
+  bots[1].state.paused=false; bots[1].state.bannedAt=null;
+  bots[1].runQueue(bots[2]); res.json({ok:true});
+});
 app.post('/api/pause',(req,res)=>{bots[1].state.paused=!bots[1].state.paused;res.json({ok:true});});
 app.post('/api/clear',(req,res)=>{bots[1].clear();res.json({ok:true});});
 app.get('/api/groups',async(req,res)=>{if(!bots[1].state.ready)return res.json([]);const c=await bots[1].client.getChats();res.json(c.filter(x=>x.isGroup).map(x=>({name:x.name,count:x.participants?.length||0})));});
