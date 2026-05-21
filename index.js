@@ -254,79 +254,57 @@ function removeLocks(dir) {
   } catch(e) {}
 }
 
-// ─── FIX export-groupe : getContactById avec timeout individuel ───────────────
+// ─── FIX export-group : getContactById avec timeout + throttle + retry ────────
 //
-// Problème : La boucle for..of appelait getContactById() sans aucun délai entre
-// chaque participant. Sur un groupe de 100+ membres, WA Web envoie à Puppeteer
-// une rafale de requêtes synchrones qui déclenche un rate-limit côté WA (
-// "Error: Evaluation failed: Error: rate-overlimit" ou ECONNRESET). De plus,
-// getContactById() n'a pas de timeout natif : si Puppeteer ne répond pas (session
-// WA expirée, page gelée), la Promise pend indéfiniment et bloque la route HTTP
-// jusqu'à ce qu'Express ferme la connexion.
+// Problème original :
+//   La boucle for..of appelait getContactById() en rafale, sans délai ni timeout.
+//   Sur un groupe de 100+ membres cela provoquait :
+//     1. Rate-limit WA Web ("rate-overlimit" / ECONNRESET)
+//     2. Hang infini si Puppeteer ne répondait pas (session expirée)
+//     3. Crash Express (timeout côté client) pour les grands groupes
 //
-// Corrections apportées :
-//   1. withTimeout() : wrapper qui rejette la Promise après `ms` millisecondes.
-//      Utilisé autour de chaque getContactById() (5s max par contact).
-//   2. Délai inter-requetes : 120ms entre chaque appel pour rester sous le
-//      rate-limit WA Web (throttle recommandé : < 10 req/s).
-//   3. Backoff exponentiel : si getContactById() échoue (timeout ou erreur réseau),
-//      on attend 800ms avant de réessayer une fois, puis on passe au suivant.
-//   4. Progression log : un log tous les 25 contacts pour ne pas saturer la
-//      console sur les grands groupes.
-//   5. Le nom reste vide en cas d'échec (comportement identique à avant) —
-//      aucune donnée ne se perd.
+// Corrections :
+//   - withTimeout()        : rejette la Promise après 5 s pour éviter le hang
+//   - getContactName()     : 1 retry automatique avec backoff 800 ms
+//   - EXPORT_GROUP_INTER_DELAY_MS (120 ms) : throttle < 10 req/s
+//   - Log de progression   : tous les 25 contacts
 
-/** Wrapper : rejette la Promise après `ms` ms si elle n'est pas résolue. */
-function withTimeout(promise, ms, label) {
+/**
+ * Rejette la Promise `p` après `ms` millisecondes si elle n'est pas résolue.
+ */
+function withTimeout(p, ms, label) {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`Timeout (${ms}ms) : ${label}`)), ms);
-    promise.then(
-      val  => { clearTimeout(timer); resolve(val); },
-      err  => { clearTimeout(timer); reject(err); }
-    );
+    const t = setTimeout(() => reject(new Error(`Timeout ${ms}ms : ${label}`)), ms);
+    p.then(v => { clearTimeout(t); resolve(v); },
+           e => { clearTimeout(t); reject(e);  });
   });
 }
 
 /**
- * Récupère le nom affiché d'un participant WA avec timeout + retry.
- * @param {Client} client   - Instance whatsapp-web.js
- * @param {string} userId   - ID de l'utilisateur (ex: "33612345678")
- * @param {number} timeoutMs - Délai max par tentative (défaut 5000ms)
- * @returns {{ prenom: string, nom: string }}
+ * Récupère prenom/nom d'un participant WA avec timeout individuel + 1 retry.
+ * Retourne { prenom: '', nom: '' } en cas d'échec total (silencieux).
  */
 async function getContactName(client, userId, timeoutMs = 5000) {
-  const chatId = `${userId}@c.us`;
-  try {
-    const contact = await withTimeout(
-      client.getContactById(chatId),
-      timeoutMs,
-      `getContactById(${userId})`
-    );
-    const displayName = (contact.pushname || contact.name || '').trim();
-    const parts = displayName.split(/\s+/);
+  const chatId  = `${userId}@c.us`;
+  const extract = contact => {
+    const parts = (contact.pushname || contact.name || '').trim().split(/\s+/);
     return { prenom: parts[0] || '', nom: parts.slice(1).join(' ') || '' };
-  } catch (firstErr) {
-    // Un seul retry après backoff de 800ms
-    await sleep(800);
+  };
+  try {
+    return extract(await withTimeout(client.getContactById(chatId), timeoutMs, userId));
+  } catch (_) {
+    await sleep(800); // backoff avant retry
     try {
-      const contact = await withTimeout(
-        client.getContactById(chatId),
-        timeoutMs,
-        `getContactById(${userId}) retry`
-      );
-      const displayName = (contact.pushname || contact.name || '').trim();
-      const parts = displayName.split(/\s+/);
-      return { prenom: parts[0] || '', nom: parts.slice(1).join(' ') || '' };
-    } catch (retryErr) {
-      // Erreur silencieuse : on laisse prenom/nom vides plutôt que de planter
-      console.warn(`[export-group] ⚠️  ${userId} : ${retryErr.message}`);
+      return extract(await withTimeout(client.getContactById(chatId), timeoutMs, `${userId} retry`));
+    } catch (err) {
+      console.warn(`[export-group] ⚠️  ${userId} ignoré : ${err.message}`);
       return { prenom: '', nom: '' };
     }
   }
 }
 
-// Délai en ms entre deux appels getContactById pour éviter le rate-limit WA.
-const EXPORT_GROUP_INTER_DELAY_MS = 120;
+/** Délai inter-requêtes pour rester sous le rate-limit WA Web (< 10 req/s). */
+const EXPORT_GROUP_INTER_DELAY_MS = parseInt(process.env.EXPORT_GROUP_DELAY_MS || '120');
 
 // ─── BotAccount ──────────────────────────────────────────────────────────────
 class BotAccount {
@@ -343,10 +321,8 @@ class BotAccount {
       queue: [], sessionCount: 0,
       dailySent: 0, dailyDate: '',
       windowStart: null,
-      limitReached: false,
-      limitReachedAt: null,
-      resumeAt: null,
-      bannedAt: null,
+      limitReached: false, limitReachedAt: null,
+      resumeAt: null, bannedAt: null,
       repliesReceived: 0,
       log: loadLogs(id),
       stats: { sent: 0, failed: 0, skipped: 0, blacklisted: 0 }
@@ -396,10 +372,8 @@ class BotAccount {
       sessionCount: this.state.sessionCount,
       dailySent: this.state.dailySent, dailyDate: this.state.dailyDate,
       windowStart: this.state.windowStart,
-      limitReached: this.state.limitReached,
-      limitReachedAt: this.state.limitReachedAt,
-      resumeAt: this.state.resumeAt,
-      bannedAt: this.state.bannedAt,
+      limitReached: this.state.limitReached, limitReachedAt: this.state.limitReachedAt,
+      resumeAt: this.state.resumeAt, bannedAt: this.state.bannedAt,
       repliesReceived: this.state.repliesReceived,
       savedAt: new Date().toISOString()
     }, null, 2));
@@ -456,7 +430,6 @@ class BotAccount {
   }
 
   _recordFirstSend() { if (!this.state.windowStart) this.state.windowStart = new Date().toISOString(); }
-
   _dailyLimitReached() { this._checkWindowReset(); return this.state.dailySent >= this.dailyLimit; }
 
   _detectBan(errMessage) {
@@ -541,7 +514,7 @@ class BotAccount {
     this.client.initialize().catch(err => { this.log(`Erreur initialisation : ${err.message}`, 'error'); this._scheduleRetry(15000); });
   }
 
-  async _delayMsg()     { const ms=rand(config.minDelay,config.maxDelay)*1000;           this.log(`⏳ Pause : ${(ms/1000).toFixed(0)}s`,'info');          await sleep(ms); }
+  async _delayMsg()     { const ms=rand(config.minDelay,config.maxDelay)*1000;               this.log(`⏳ Pause : ${(ms/1000).toFixed(0)}s`,'info');          await sleep(ms); }
   async _delaySession() { const ms=rand(config.sessionPauseMin,config.sessionPauseMax)*1000; this.log(`☕ Pause session : ${(ms/60000).toFixed(0)}min`,'warn'); await sleep(ms); }
   async _typing(chat)   { try { await chat.sendStateTyping(); await sleep(rand(config.typingMin,config.typingMax)); await chat.clearState(); } catch(e) {} }
 
@@ -945,7 +918,7 @@ app.post('/api/config',(req,res)=>{
   saveConfig(); res.json({ok:true,config});
 });
 
-app.get('/api/:account/groups',async(req,res)=>{
+app.get('/api/:account/groups', async (req,res)=>{
   const bot=requireBot(req,res); if(!bot) return;
   if(!bot.state.ready) return res.json([]);
   const chats=await bot.client.getChats();
@@ -955,13 +928,15 @@ app.get('/api/:account/groups',async(req,res)=>{
 /**
  * GET /api/:account/export-group/:name
  *
- * FIX : getContactById sans timeout ni rate-limit
- * ───────────────────────────────────────────────────
- * Les appels getContactById() sont maintenant :
- *   - Throttlés (EXPORT_GROUP_INTER_DELAY_MS entre chaque)
- *   - Protégés par un timeout individuel de 5s (withTimeout)
- *   - Réessayés une fois en cas d'échec (backoff 800ms)
- *   - Loggés avec progression tous les 25 contacts
+ * FIX : getContactById sans timeout ni throttle
+ * ─────────────────────────────────────────────
+ * Chaque participant est résolu via getContactName() qui :
+ *   1. Impose un timeout individuel de 5 s (withTimeout)
+ *   2. Retry automatique après 800 ms en cas d'échec
+ *   3. Renvoie prenom/nom vides silencieusement si les 2 tentatives échouent
+ * Un délai de EXPORT_GROUP_INTER_DELAY_MS (120 ms) est inséré entre chaque
+ * participant pour rester sous le rate-limit WA Web (< 10 req/s).
+ * Un log de progression est émis tous les 25 contacts.
  */
 app.get('/api/:account/export-group/:name', async (req, res) => {
   const bot = requireBot(req, res); if (!bot) return;
@@ -973,27 +948,25 @@ app.get('/api/:account/export-group/:name', async (req, res) => {
   if (!group) return res.status(404).json({ ok: false, error: 'Groupe introuvable' });
 
   const participants = group.participants || [];
-  const rows         = [];
   const total        = participants.length;
+  const rows         = [];
 
-  console.log(`[export-group] 📤 Export "${groupName}" : ${total} participants`);
+  console.log(`[export-group] 📤 "${groupName}" — ${total} participants`);
 
   for (let i = 0; i < participants.length; i++) {
     const p = participants[i];
 
-    // Progression log tous les 25 contacts
-    if (i > 0 && i % 25 === 0) {
-      console.log(`[export-group] ⏳ ${i}/${total} contacts traités...`);
-    }
+    if (i > 0 && i % 25 === 0)
+      console.log(`[export-group] ⏳ ${i}/${total} traités...`);
 
     const { prenom, nom } = await getContactName(bot.client, p.id.user);
     rows.push({ telephone: `+${p.id.user}`, prenom, nom, admin: p.isAdmin ? 'Oui' : 'Non' });
 
-    // Délai inter-requêtes pour éviter le rate-limit WA Web
+    // Throttle : ne pas dépasser ~8 req/s pour éviter le rate-limit WA
     if (i < participants.length - 1) await sleep(EXPORT_GROUP_INTER_DELAY_MS);
   }
 
-  console.log(`[export-group] ✅ Export terminé : ${rows.length}/${total} contacts`);
+  console.log(`[export-group] ✅ ${rows.length}/${total} contacts exportés`);
 
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(groupName)}.csv"`);
