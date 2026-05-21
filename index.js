@@ -460,6 +460,16 @@ function isWhatsAppFetchBug(err) {
   return /waitForChatLoading|loadEarlierMsgs/i.test(m);
 }
 
+function isMessageRejectedError(err) {
+  const m = (err && err.message) || String(err);
+  return /rejet[eé]|ACK_ERROR/i.test(m);
+}
+
+function isGhostSessionError(err) {
+  const m = (err && err.message) || String(err);
+  return /session fant[oô]me|identiques|silencieux/i.test(m);
+}
+
 async function verifyMessageInChat(chat, text, msgId, label, opts = {}) {
   const { softFail = false, logger = null } = opts;
   await sleep(2500);
@@ -637,6 +647,7 @@ class BotAccount {
     this._saveQueueTimer = null;
     this._queueLoopActive = false;
     this._resettingAuth  = false;
+    this._consecutiveRejects = 0;
     this._initializing   = false;
     this._postReadyScheduled = false;
     this.state = {
@@ -822,7 +833,7 @@ class BotAccount {
   }
 
   _detectBan(errMessage) {
-    return [/rate.?limit/i,/too many/i,/spam/i,/blocked/i,/account.*banned/i,/restrict/i,/session fant[oô]me/i,/ghost/i,/ACK_ERROR/i,/rejet[eé]/i,/silencieux/i,/ECONNRESET/i,/WAWebDisconnected/i,/identiques/i].some(p=>p.test(errMessage));
+    return [/rate.?limit/i,/too many/i,/spam/i,/blocked/i,/account.*banned/i,/restrict/i,/ECONNRESET/i,/WAWebDisconnected/i].some(p=>p.test(errMessage));
   }
   _handleBan(err) {
     this.state.running = false; this.state.bannedAt = new Date().toISOString(); this.state.paused = true;
@@ -1186,6 +1197,7 @@ class BotAccount {
           }
           this._recordFirstSend();
           const result = await this._sendMessage(chatId, rawMsg, personalizedLink);
+          this._consecutiveRejects = 0;
           contact.status='done'; contact.sentAt=new Date().toISOString();
           contact.waMessageId=result.lastId; contact.whatsappMessagesSent=result.messageCount;
           this.state.stats.sent++; this.state.sessionCount++;
@@ -1198,10 +1210,27 @@ class BotAccount {
           await this._delayMsg();
           if (!this.state.running) break;
         } catch(err) {
-          if (/session fant[oô]me|identiques|silencieux|ACK_ERROR|rejet[eé]|waitForChatLoading/i.test(err.message)) {
+          if (isGhostSessionError(err)) {
             contact.status = 'pending';
             this._handleGhostSession(err);
             break;
+          }
+          if (isMessageRejectedError(err)) {
+            if (contact.status === 'processing') contact.status = 'failed';
+            contact.lastError = err.message;
+            this.state.stats.failed++;
+            this._consecutiveRejects = (this._consecutiveRejects || 0) + 1;
+            const maxRejects = parseInt(process.env.MAX_CONSECUTIVE_REJECTS || '12', 10);
+            this.log(`⛔ Refus WhatsApp pour +${number} : ${err.message} — contact ignoré (${this._consecutiveRejects}/${maxRejects} consécutifs)`, 'warn');
+            this._saveQueue();
+            if (this._consecutiveRejects >= maxRejects) {
+              this.log(`🛑 ${maxRejects} refus consécutifs — pause queue (compte peut être limité). Reprenez plus tard ou Compte 2.`, 'error');
+              this.state.paused = true;
+              this.state.running = false;
+              break;
+            }
+            await sleep(rand(45000, 90000));
+            continue;
           }
           if (this._detectBan(err.message)) { contact.status='pending'; this._handleBan(err); break; }
           if (contact.status === 'processing') contact.status = 'failed';
