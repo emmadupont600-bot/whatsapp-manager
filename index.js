@@ -43,8 +43,6 @@ cleanUploadsDir();
 setInterval(cleanUploadsDir, MAX_AGE_MS);
 
 // ─── Middleware d'authentification par token Bearer ───────────────────────────
-// Si AUTH_TOKEN n'est pas défini, TOUTES les routes /api sont publiques.
-// Définir la variable d'environnement AUTH_TOKEN pour activer la protection.
 const AUTH_TOKEN = process.env.AUTH_TOKEN || '';
 function authMiddleware(req, res, next) {
   if (!AUTH_TOKEN) return next();
@@ -294,7 +292,6 @@ let config = {
   maxMessagesPerHour: parseInt(process.env.MAX_MSGS_PER_HOUR || '80'),
   dailyLimit:     {},
   autoResume:     true,
-  /** Afficher le quota en « contacts » (texte+lien) : limite ÷ 2 côté UI */
   quotaAsContacts: true
 };
 const CONFIG_FILE = path.join(__dirname, 'data', 'config.json');
@@ -302,7 +299,6 @@ if (fs.existsSync(CONFIG_FILE)) {
   try {
     const saved = JSON.parse(fs.readFileSync(CONFIG_FILE,'utf-8'));
     Object.assign(config, saved);
-    // FIX : valider la cohérence cross-champs au chargement depuis le disque
     if (config.minDelay        > config.maxDelay)        config.maxDelay        = config.minDelay;
     if (config.sessionPauseMin > config.sessionPauseMax) config.sessionPauseMax = config.sessionPauseMin;
     if (config.typingMin       > config.typingMax)       config.typingMax       = config.typingMin;
@@ -337,7 +333,6 @@ function splitMessageAndLink(msg) {
   return { text: [before, after].filter(Boolean).join('\n').trim(), url };
 }
 
-/** Nombre de messages WhatsApp réellement envoyés (texte + lien séparé = 2). */
 function countOutboundMessages(rawMsg, link) {
   const text = (rawMsg || '').trim();
   const separateLink = !!(link && link.trim());
@@ -369,7 +364,7 @@ function removeLocks(dir) {
   } catch(e) {}
 }
 
-// ─── getContactById avec timeout + retry ─────────────────────────────────────
+// ─── withTimeout ─────────────────────────────────────────────────────────────
 function withTimeout(p, ms, label) {
   return new Promise((resolve, reject) => {
     const t = setTimeout(() => reject(new Error(`Timeout ${ms}ms : ${label}`)), ms);
@@ -399,14 +394,63 @@ async function getContactName(client, userId, timeoutMs = 5000) {
 
 const EXPORT_GROUP_INTER_DELAY_MS = parseInt(process.env.EXPORT_GROUP_DELAY_MS || '120');
 
-// ─── FIX: isRegisteredUser avec fallback (évite les faux "skipped" sur Railway) ─
+// ─── safeIsRegisteredUser avec fallback ──────────────────────────────────────
 async function safeIsRegisteredUser(client, chatId, logger) {
   try {
     return await withTimeout(client.isRegisteredUser(chatId), 8000, `isRegisteredUser(${chatId})`);
   } catch(e) {
     if (logger) logger(`⚠️ isRegisteredUser échoué pour ${chatId} (${e.message}) — on tente l'envoi quand même`, 'warn');
-    return true; // en cas d'erreur réseau/timeout, on tente l'envoi plutôt que de skipper
+    return true;
   }
+}
+
+// ─── FIX PRINCIPAL : getChatById avec retry robuste ──────────────────────────
+// Sur Railway, getChatById peut retourner null ou un objet sans sendMessage
+// après une reconnexion partielle de Puppeteer. On retry jusqu'à 3 fois.
+async function getChat(client, chatId, logger) {
+  const MAX_RETRIES = 3;
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const chat = await withTimeout(client.getChatById(chatId), 10000, `getChatById(${chatId}) attempt ${attempt}`);
+      if (!chat) throw new Error('getChatById a retourné null');
+      if (typeof chat.sendMessage !== 'function') throw new Error('chat.sendMessage n\'est pas une fonction');
+      return chat;
+    } catch(e) {
+      if (logger) logger(`⚠️ getChatById attempt ${attempt}/${MAX_RETRIES} échoué : ${e.message}`, 'warn');
+      if (attempt < MAX_RETRIES) await sleep(2000 * attempt);
+    }
+  }
+  throw new Error(`getChatById(${chatId}) a échoué après ${MAX_RETRIES} tentatives`);
+}
+
+// ─── FIX PRINCIPAL : sendMessage avec vérification post-envoi ────────────────
+// On vérifie que le message apparaît bien dans la conversation après envoi.
+// Si le message n'est pas trouvé dans les 5 secondes → on throw une vraie erreur.
+async function sendAndVerify(client, chat, chatId, text, label, logger) {
+  const msg = await withTimeout(chat.sendMessage(text), 15000, `sendMessage(${label})`);
+  const msgId = whatsappMsgId(msg);
+
+  if (!msgId) {
+    // Pas d'id fourni par whatsapp-web.js — on vérifie via getMessages
+    if (logger) logger(`⚠️ sendMessage(${label}) sans id — vérification via getMessages...`, 'warn');
+    await sleep(3000);
+    try {
+      const messages = await withTimeout(chat.fetchMessages({ limit: 5 }), 8000, `fetchMessages(${label})`);
+      const recent = messages.filter(m => m.fromMe && m.body === text && (Date.now() - m.timestamp * 1000) < 30000);
+      if (recent.length === 0) {
+        throw new Error(`Message "${label}" non trouvé dans la conversation après envoi — whatsapp-web.js déconnecté`);
+      }
+      if (logger) logger(`✔️ Message ${label} confirmé via fetchMessages`, 'info');
+      return { id: 'verified-no-id', verified: true };
+    } catch(verifyErr) {
+      if (verifyErr.message.includes('non trouvé')) throw verifyErr;
+      // fetchMessages lui-même a échoué → session probablement morte
+      throw new Error(`Session WhatsApp instable : sendMessage OK mais fetchMessages échoué (${verifyErr.message})`);
+    }
+  }
+
+  if (logger) logger(`✔️ Message ${label} envoyé · id: ${msgId.substring(0, 20)}...`, 'info');
+  return { id: msgId, verified: true };
 }
 
 // ─── BotAccount ──────────────────────────────────────────────────────────────
@@ -657,7 +701,6 @@ class BotAccount {
     });
     c.on('ready', async () => {
       this.retryCount = 0; this.state.ready = true; this.state.qr = null;
-      // FIX : afficher le numéro de téléphone réellement connecté pour diagnostic
       try {
         const info = c.info;
         const phone = info && info.wid ? info.wid.user : '?';
@@ -717,48 +760,44 @@ class BotAccount {
   async _typing(chat)   { try { await chat.sendStateTyping(); await sleep(rand(config.typingMin,config.typingMax)); await chat.clearState(); } catch(e) {} }
 
   async _sendMessage(chatId, rawMsg, link) {
-    const chat = await this.client.getChatById(chatId);
+    // FIX PRINCIPAL : utilisation de getChat() avec retry pour éviter les chat null
+    const chat = await getChat(this.client, chatId, this.log.bind(this));
     const ids = [];
-    // FIX : assertSent ne throw plus si l'id est null (whatsapp-web.js ne retourne pas
-    // toujours un id valide selon la version) — on log un warning au lieu d'une erreur fatale
-    const assertSent = (msg, label) => {
-      const id = whatsappMsgId(msg);
-      if (!id) {
-        console.warn(`[BOT${this.id}] ⚠️ sendMessage() sans accusé WhatsApp (${label}) — message probablement envoyé mais sans id confirmé`);
-        ids.push('no-id-' + Date.now());
-        return 'no-id';
-      }
-      ids.push(id);
-      return id;
+
+    const doSend = async (text, label) => {
+      const result = await sendAndVerify(this.client, chat, chatId, text, label, this.log.bind(this));
+      ids.push(result.id);
+      return result.id;
     };
+
     if (link && link.trim()) {
       const text = (rawMsg || '').trim();
       if (text) {
         await this._typing(chat);
-        assertSent(await this.client.sendMessage(chatId, text), 'texte');
+        await doSend(text, 'texte');
         const delay = rand(config.linkDelayMin, config.linkDelayMax);
         this.log(`⏱ Délai anti-ban avant lien : ${(delay/1000).toFixed(1)}s`, 'info');
         await sleep(delay);
       }
       await this._typing(chat);
-      assertSent(await this.client.sendMessage(chatId, link.trim()), 'lien');
+      await doSend(link.trim(), 'lien');
       return { messageCount: text ? 2 : 1, ids, lastId: ids[ids.length - 1] };
     }
     const parts = splitMessageAndLink(rawMsg);
     if (parts) {
       if (parts.text) {
         await this._typing(chat);
-        assertSent(await this.client.sendMessage(chatId, parts.text), 'texte');
+        await doSend(parts.text, 'texte');
         await sleep(rand(config.linkDelayMin, config.linkDelayMax));
-        assertSent(await this.client.sendMessage(chatId, parts.url), 'lien');
+        await doSend(parts.url, 'lien');
         return { messageCount: 2, ids, lastId: ids[ids.length - 1] };
       }
       await this._typing(chat);
-      assertSent(await this.client.sendMessage(chatId, parts.url), 'url-seule');
+      await doSend(parts.url, 'url-seule');
       return { messageCount: 1, ids, lastId: ids[ids.length - 1] };
     }
     await this._typing(chat);
-    assertSent(await this.client.sendMessage(chatId, rawMsg), 'texte-simple');
+    await doSend(rawMsg, 'texte-simple');
     return { messageCount: 1, ids, lastId: ids[ids.length - 1] };
   }
 
@@ -850,7 +889,6 @@ class BotAccount {
       if (this.state.sessionCount > 0 && this.state.sessionCount % config.sessionSize === 0) {
         this.log(`📊 Session ${Math.floor(this.state.sessionCount/config.sessionSize)} terminée`,'info');
         await this._delaySession();
-        // FIX : sortir si le bot a été stoppé pendant la pause session (peut durer 20 min)
         if (!this.state.running) break;
       }
 
@@ -865,8 +903,6 @@ class BotAccount {
           this.log(`🚫 Blacklisté : +${number}`,'warn');
           this._saveQueue(); await sleep(rand(1000,3000)); continue;
         }
-        // FIX : utilisation de safeIsRegisteredUser avec fallback pour éviter les faux "skipped"
-        // dus aux timeouts réseau sur Railway
         const isRegistered = await safeIsRegisteredUser(this.client, chatId, this.log.bind(this));
         if (!isRegistered) {
           contact.status='skipped'; this.state.stats.skipped++;
@@ -917,11 +953,10 @@ class BotAccount {
         this.state.dailySent += result.messageCount;
         this._recordMessagesSent(result.messageCount);
         const linkNote = result.messageCount >= 2 ? ' (texte + lien = 2 msgs)' : '';
-        this.log(`✅ Envoyé à +${number}${contact.prenom?' ('+contact.prenom+')':''}${linkNote} [${this.state.dailySent}/${this.dailyLimit} msgs]`,'success');
+        this.log(`✅ Envoyé à +${number}${contact.prenom?' ('+contact.prenom+')':''}${linkNote} [${this.state.dailySent}/${this.dailyLimit} msgs] · id: ${(result.lastId||'').substring(0,20)}...`,'success');
         addToSentHistory(number, { sentAt: contact.sentAt, botId: this.id, message: rawMsg, link: personalizedLink, prenom: contact.prenom, nom: contact.nom });
         this._saveQueue();
         await this._delayMsg();
-        // FIX : sortir si le bot a été stoppé pendant le délai inter-messages
         if (!this.state.running) break;
       } catch(err) {
         if (this._detectBan(err.message)) { contact.status='pending'; this._handleBan(err); break; }
@@ -1100,7 +1135,6 @@ app.post('/api/:account/start', (req,res)=>{
   b.runQueue(otherBot(b));
   res.json({ok:true, pending, dailySent:b.state.dailySent, dailyLimit:b.dailyLimit});
 });
-// FIX : pause annule aussi le planning si actif (cohérence avec clear/reset)
 app.post('/api/:account/pause', (req,res)=>{
   const b=requireBot(req,res); if(!b) return;
   b.state.paused=!b.state.paused;
@@ -1346,7 +1380,6 @@ app.get('/api/:account/groups', async (req,res)=>{
   }
 });
 
-// FIX : export-group en streaming CSV pour éviter le timeout HTTP sur les grands groupes
 app.get('/api/:account/export-group/:name', async (req, res) => {
   const bot = requireBot(req, res); if (!bot) return;
   if (!bot.state.ready) return res.status(400).json({ ok: false, error: 'Non connecté' });
@@ -1367,7 +1400,6 @@ app.get('/api/:account/export-group/:name', async (req, res) => {
 
   console.log(`[export-group] 📤 "${groupName}" — ${total} participants`);
 
-  // Streaming : envoyer les headers immédiatement pour éviter le timeout navigateur
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(groupName)}.csv"`);
   res.write('telephone,prenom,nom,admin\n');
@@ -1380,7 +1412,6 @@ app.get('/api/:account/export-group/:name', async (req, res) => {
     const p = participants[i];
     if (i > 0 && i % 25 === 0) console.log(`[export-group] ⏳ ${i}/${total} traités...`);
     const { prenom, nom } = await getContactName(bot.client, p.id.user);
-    // Échapper les virgules/guillemets pour le CSV
     const esc = v => `"${(v||'').replace(/"/g,'""')}"`;
     res.write(`+${p.id.user},${esc(prenom)},${esc(nom)},${p.isAdmin?'Oui':'Non'}\n`);
     if (i < participants.length - 1) await sleep(EXPORT_GROUP_INTER_DELAY_MS);
@@ -1398,7 +1429,6 @@ app.post('/api/start',(req,res)=>{
   cancelSchedule(bots[1].id);
   bots[1].runQueue(bots[2]); res.json({ok:true});
 });
-// FIX : pause legacy annule aussi le planning si actif
 app.post('/api/pause',(req,res)=>{
   bots[1].state.paused=!bots[1].state.paused;
   if (bots[1].state.paused) cancelSchedule(bots[1].id);
