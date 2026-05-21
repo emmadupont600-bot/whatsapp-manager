@@ -2,5 +2,18 @@ node_modules/
 .wwebjs_auth/
 uploads/
 exports/
-data/
+
+# Données sensibles — numéros de téléphone, historiques, sessions, logs
+data/*.json
+data/logs_*.json
+data/queue_*.json
+data/sent-history.json
+data/blacklist.json
+data/sessions.json
+data/config.json
+
+# Garder le dossier data/ présent dans le repo
+!data/.gitkeep
+
 *.zip
+.env
