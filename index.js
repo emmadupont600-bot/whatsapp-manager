@@ -12,6 +12,26 @@ process.on('uncaughtException',  (err)    => console.error('[FATAL] Uncaught exc
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
+const APP_VERSION = require('./package.json').version || '1.0.0';
+const BUILD_COMMIT = (process.env.RAILWAY_GIT_COMMIT_SHA || process.env.GITHUB_SHA || 'dev').slice(0, 12);
+
+function getAuthBase() {
+  return process.env.AUTH_PATH || __dirname;
+}
+
+function parseResetAuthOnStart() {
+  const v = (process.env.RESET_AUTH || '').trim();
+  if (!v || v === '0' || v === 'false') return new Set();
+  if (v === '1' || v === 'true' || v === 'all') return new Set([1, 2]);
+  const ids = new Set();
+  for (const part of v.split(',')) {
+    const n = parseInt(part.trim(), 10);
+    if (n === 1 || n === 2) ids.add(n);
+  }
+  return ids;
+}
+const RESET_AUTH_ON_START = parseResetAuthOnStart();
+
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
@@ -395,7 +415,7 @@ async function sendAndVerify(client, chat, chatId, text, label, logger) {
 class BotAccount {
   constructor(id) {
     this.id         = id;
-    this.authPath   = path.join(process.env.AUTH_PATH || '/app', '.wwebjs_auth', `account${id}`);
+    this.authPath   = path.join(getAuthBase(), '.wwebjs_auth', `account${id}`);
     this.dataFile   = path.join(__dirname, 'data', `queue_${id}.json`);
     this.client     = null;
     this.retryCount = 0;
@@ -418,6 +438,10 @@ class BotAccount {
     };
     this._loadQueue();
     this._autoResume();
+    if (RESET_AUTH_ON_START.has(id)) {
+      rmrf(this.authPath);
+      console.log(`[BOT${id}] 🗑️ RESET_AUTH au démarrage — session supprimée : ${this.authPath}`);
+    }
     this._initClient();
   }
 
@@ -1012,6 +1036,17 @@ function requireBot(req, res) {
 function otherBot(bot){return bot.id===1?bots[2]:bots[1];}
 
 // ─── Routes API ───────────────────────────────────────────────────────────────
+app.get('/api/health', (req, res) => {
+  res.json({
+    ok: true,
+    version: APP_VERSION,
+    commit: BUILD_COMMIT,
+    features: { resetAuth: true },
+    resetAuthOnStart: [...RESET_AUTH_ON_START],
+    uptimeSec: Math.round(process.uptime()),
+  });
+});
+
 app.get('/api/:account/status', (req,res)=>{ const b=requireBot(req,res); if(!b) return; res.json(b.getStatus()); });
 
 app.post('/api/:account/start', (req,res)=>{
@@ -1042,18 +1077,18 @@ app.post('/api/:account/unstick', (req,res)=>{
   res.json({ok:true, fixed});
 });
 
-// ─── NOUVELLE ROUTE : reset-auth — supprime la session et génère un nouveau QR ─
-// Usage : POST /api/1/reset-auth
-// Utile quand le bot semble connecté mais les messages n'arrivent pas
-// (session WhatsApp Web fantôme / désynchronisée)
-app.post('/api/:account/reset-auth', async (req,res)=>{
-  const b=requireBot(req,res); if(!b) return;
-  if (b._resettingAuth) return res.status(409).json({ok:false,error:'Reset déjà en cours'});
+// ─── reset-auth — supprime la session et génère un nouveau QR ────────────────
+function handleResetAuth(b, res) {
+  if (b._resettingAuth) return res.status(409).json({ ok: false, error: 'Reset déjà en cours' });
   b.log('🔑 Reset auth demandé via API', 'warn');
-  res.json({ok:true,message:'Réinitialisation de la session en cours — un nouveau QR va apparaître dans le dashboard dans quelques secondes'});
-  // Exécuter en arrière-plan pour ne pas bloquer la réponse HTTP
+  res.json({ ok: true, message: 'Réinitialisation de la session en cours — un nouveau QR va apparaître dans le dashboard dans quelques secondes' });
   b.resetAuth().catch(e => b.log(`❌ Erreur resetAuth : ${e.message}`, 'error'));
+}
+app.post('/api/:account/reset-auth', (req, res) => {
+  const b = requireBot(req, res); if (!b) return;
+  handleResetAuth(b, res);
 });
+app.post('/api/reset-auth', (req, res) => handleResetAuth(bots[1], res));
 
 app.post('/api/:account/clear', (req,res)=>{ const b=requireBot(req,res); if(!b) return; cancelSchedule(b.id); b.clear(); res.json({ok:true}); });
 app.post('/api/:account/reset', (req,res)=>{ const b=requireBot(req,res); if(!b) return; cancelSchedule(b.id); b.reset(); res.json({ok:true}); });
@@ -1293,4 +1328,19 @@ app.get('/api/groups',async(req,res)=>{
   } catch(e) { res.status(500).json({ok:false,error:'Erreur récupération groupes : ' + e.message}); }
 });
 
-app.listen(PORT,()=>console.log(`WhatsApp Manager → http://localhost:${PORT}`));
+app.use((req, res) => {
+  res.status(404).json({
+    ok: false,
+    error: 'Route introuvable',
+    method: req.method,
+    path: req.path,
+    commit: BUILD_COMMIT,
+    hint: 'Vérifiez GET /api/health puis POST /api/1/reset-auth (utilisez votre URL Railway réelle)',
+  });
+});
+
+app.listen(PORT, () => {
+  console.log(`WhatsApp Manager → http://localhost:${PORT}`);
+  console.log(`[BUILD] v${APP_VERSION} commit=${BUILD_COMMIT} reset-auth=ok`);
+  if (RESET_AUTH_ON_START.size) console.log(`[RESET_AUTH] Comptes au démarrage : ${[...RESET_AUTH_ON_START].join(', ')}`);
+});

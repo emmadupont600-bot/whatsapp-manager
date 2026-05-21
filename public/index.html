@@ -565,6 +565,14 @@ tr:hover td{background:var(--surface2)}
           </ol>
         </div>
       </div>
+      <div class="card" style="margin-top:14px;border-color:color-mix(in oklch,var(--yellow) 35%,var(--border))">
+        <div class="card-title">Session fantôme ?</div>
+        <p style="font-size:13px;color:var(--muted);line-height:1.7;margin-bottom:12px">
+          Si le bot semble connecté mais les messages n'apparaissent pas sur votre téléphone, supprimez la session et rescannez un nouveau QR.
+        </p>
+        <button class="btn btn-danger" id="btn-reset-auth" onclick="resetAuth()">🔑 Reset Auth — Nouveau QR</button>
+        <span id="reset-auth-status" style="font-size:12px;color:var(--muted);margin-left:10px"></span>
+      </div>
     </div>
 
     <!-- ─── PARAMÈTRES ───────────────────────────────── -->
@@ -1326,10 +1334,40 @@ function updateQR(qr, ready, acct) {
     lastQr[acct] = null;
   }
 }
+
+async function resetAuth() {
+  const acct = currentAccount;
+  if (!confirm(`Réinitialiser la session WhatsApp du compte ${acct} ?\n\nVous devrez rescanner le QR code. Les messages en queue restent en attente.`)) return;
+  const statusEl = document.getElementById('reset-auth-status');
+  const btn = document.getElementById('btn-reset-auth');
+  if (btn) btn.disabled = true;
+  if (statusEl) statusEl.textContent = 'Réinitialisation…';
+  try {
+    const r = await fetch(`/api/${acct}/reset-auth`, { method: 'POST' }).then(res => res.json().catch(() => ({})));
+    if (!r.ok) {
+      alert(r.error || 'Échec du reset auth — vérifiez GET /api/health sur votre URL Railway');
+      if (statusEl) statusEl.textContent = '';
+      return;
+    }
+    if (statusEl) statusEl.textContent = '✓ ' + (r.message || 'Nouveau QR dans quelques secondes');
+    lastQr[acct] = null;
+    connDisplay[acct] = { shown: false, since: 0 };
+    fetchStatus();
+  } catch (e) {
+    alert('Erreur réseau : ' + e.message);
+    if (statusEl) statusEl.textContent = '';
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 async function fetchStatus() {
   try {
     const r = await fetch(`/api/${currentAccount}/status`).then(res => res.json());
     applyStatus(r);
+    const resetSt = document.getElementById('reset-auth-status');
+    if (resetSt && r.resettingAuth) resetSt.textContent = '⏳ Génération du nouveau QR…';
+    else if (resetSt && resetSt.textContent.startsWith('⏳')) resetSt.textContent = '';
   } catch(e) {}
   const other = currentAccount === 1 ? 2 : 1;
   try {
