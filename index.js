@@ -672,7 +672,12 @@ class BotAccount {
       autoResume:config.autoResume, bannedAt:this.state.bannedAt,
       repliesReceived:this.state.repliesReceived,
       scheduledAt:schedules[this.id]?.scheduledAt||null,
+      // ── FIX #6 : tous les délais exposés dans le statut ──────────────────
       minDelay:config.minDelay, maxDelay:config.maxDelay, sessionSize:config.sessionSize,
+      sessionPauseMin:config.sessionPauseMin, sessionPauseMax:config.sessionPauseMax,
+      typingMin:config.typingMin,             typingMax:config.typingMax,
+      linkDelayMin:config.linkDelayMin,       linkDelayMax:config.linkDelayMax,
+      // ─────────────────────────────────────────────────────────────────────
       log:this.state.log.slice(0,50)
     };
   }
@@ -894,8 +899,8 @@ app.get('/api/config',(req,res)=>res.json({ ...config, dailyLimit: { ..._dailyLi
 /**
  * POST /api/config
  *
- * FIX : expose tous les délais dynamiques (sessionPauseMin/Max, typingMin/Max, linkDelayMin/Max)
- * ─────────────────────────────────────────────────────────────────────────────────────────────
+ * FIX #6 : expose tous les délais dynamiques (sessionPauseMin/Max, typingMin/Max, linkDelayMin/Max)
+ * ─────────────────────────────────────────────────────────────────────────────────────────────────
  * Avant : seuls minDelay, maxDelay, sessionSize, autoResume étaient modifiables à chaud.
  * Après : 9 champs numériques + autoResume, avec validation des plages pour chacun.
  *
