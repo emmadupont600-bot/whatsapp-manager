@@ -532,10 +532,8 @@ function phoneHadSuccessfulSend(phone) {
 
 function shouldUseManualOpener(phoneDigits, isColdContact) {
   if (process.env.COLD_OPENER_MESSAGE === '0') return false;
-  if (process.env.OPENER_ALWAYS === '1') return true;
-  if (isColdContact) return true;
-  if (!phoneHadSuccessfulSend(phoneDigits)) return true;
-  return false;
+  if (process.env.OPENER_SKIP_IF_SENT === '1' && phoneHadSuccessfulSend(phoneDigits)) return false;
+  return true;
 }
 
 function useManualRouteSplit() {
@@ -550,88 +548,162 @@ function phoneToCusChatId(number) {
 
 
 
-async function openChatViaSearchUI(client, phoneDigits, logger) {
+async function openChatViaStore(client, phoneDigits, logger) {
   const page = client.pupPage;
   if (!page) return false;
   const phone = String(phoneDigits).replace(/\D/g, '');
-  const query = phone.length >= 10 && !phone.startsWith('+') ? `+${phone}` : `+${phone}`;
+  try {
+    const ok = await withTimeout(page.evaluate(async (ph) => {
+      try {
+        const WidFactory = window.require('WAWebWidFactory');
+        const Cmd = window.require('WAWebCmd');
+        const FindChat = window.require('WAWebFindChatAction');
+        const Collections = window.require('WAWebCollections');
+        const cusWid = WidFactory.createWid(ph + '@c.us');
+        if (Cmd?.openChatAt) await Cmd.openChatAt(cusWid);
+        let chat = Collections.Chat.get(cusWid);
+        if (!chat && FindChat?.findOrCreateLatestChat) {
+          chat = (await FindChat.findOrCreateLatestChat(cusWid).catch(() => null))?.chat;
+        }
+        const Open = window.require('WAWebOpenChatAction') || window.require('WAWebChatAction');
+        if (chat && Open?.openChatBottom) await Open.openChatBottom(chat);
+        return !!chat || !!Cmd?.openChatAt;
+      } catch (e) {
+        return false;
+      }
+    }, phone), 15000, 'openChatViaStore');
+    if (ok && logger) logger(`🔍 Chat ouvert (API WAWebCmd / @c.us)`, 'info');
+    return !!ok;
+  } catch (e) {
+    if (logger) logger(`⚠️ openChatViaStore : ${e.message}`, 'warn');
+    return false;
+  }
+}
 
+async function sendTextViaComposerUI(page, text, logger, label) {
   const selectors = [
-    'div[contenteditable="true"][data-tab="3"]',
-    '#side div[contenteditable="true"][role="textbox"]',
-    'div[aria-label*="Search" i][contenteditable="true"]',
-    'div[aria-label*="Recherch" i][contenteditable="true"]',
-    'div[title*="Search" i][contenteditable="true"]',
+    'footer div[contenteditable="true"][data-tab="10"]',
+    '#main footer div[contenteditable="true"][role="textbox"]',
+    'div[contenteditable="true"][data-tab="10"]',
+    '#main div[contenteditable="true"][data-tab="10"]',
   ];
-
   for (const sel of selectors) {
     try {
       const el = await page.$(sel);
       if (!el) continue;
-      await el.click({ clickCount: 3 });
-      await page.keyboard.press('Backspace');
-      await page.keyboard.type(query, { delay: 40 });
+      await el.click();
+      await page.evaluate((s, selector) => {
+        const box = document.querySelector(selector);
+        if (!box) return;
+        box.focus();
+        box.textContent = '';
+        box.dispatchEvent(new InputEvent('input', { bubbles: true }));
+      }, text, sel);
+      await page.keyboard.type(text, { delay: 35 });
+      await sleep(400);
+      await page.keyboard.press('Enter');
+      if (logger) logger(`⌨️ Envoyé via zone de saisie WhatsApp (${label})`, 'info');
       await sleep(2000);
-      const clicked = await page.evaluate((q) => {
-        const norm = (s) => (s || '').replace(/\D/g, '');
-        const qn = norm(q);
-        const tryClick = (el) => {
-          if (!el) return false;
-          el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-          el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-          el.click();
-          return true;
-        };
-        for (const el of document.querySelectorAll('div[role="button"], button, span')) {
-          const t = (el.textContent || '').trim();
-          if (/^(discuter|message|discuss|chat)$/i.test(t) || /discuter avec/i.test(t)) {
-            if (tryClick(el)) return 'discuss_btn';
-          }
-        }
-        for (const row of document.querySelectorAll('[data-testid="cell-frame-container"], div[role="listitem"]')) {
-          const txt = norm(row.textContent || '');
-          if (txt.includes(qn) || txt.includes(qn.slice(-9))) {
-            if (tryClick(row)) return 'search_row';
-          }
-        }
-        return null;
-      }, query);
-      if (clicked) {
-        if (logger) logger(`🔍 Chat ouvert via recherche WhatsApp (${clicked})`, 'info');
-        await sleep(1200);
-        return true;
-      }
+      return true;
     } catch (e) {
-      if (logger) logger(`⚠️ Recherche UI (${sel}) : ${e.message}`, 'warn');
+      if (logger) logger(`⚠️ UI composer (${sel}) : ${e.message}`, 'warn');
     }
+  }
+  return false;
+}
+
+async function openChatViaSearchUI(client, phoneDigits, logger) {
+  const page = client.pupPage;
+  if (!page) return false;
+  const phone = String(phoneDigits).replace(/\D/g, '');
+  const query = `+${phone}`;
+
+  if (await openChatViaStore(client, phoneDigits, logger)) return true;
+
+  try {
+    await page.keyboard.down('Control');
+    await page.keyboard.press('KeyF');
+    await page.keyboard.up('Control');
+    await sleep(600);
+  } catch (_) {}
+
+  const findSearch = async () => {
+    return page.evaluate(() => {
+      const side = document.querySelector('#side') || document.querySelector('#pane-side');
+      if (side) {
+        const boxes = [...side.querySelectorAll('[contenteditable="true"]')];
+        if (boxes.length) return true;
+      }
+      return !!document.querySelector('div[contenteditable="true"][data-tab="3"]');
+    });
+  };
+
+  const typeInSearch = async () => {
+    return page.evaluate((q) => {
+      const pick = () => {
+        const side = document.querySelector('#side') || document.querySelector('#pane-side');
+        if (side) {
+          const boxes = [...side.querySelectorAll('[contenteditable="true"]')];
+          if (boxes[0]) return boxes[0];
+        }
+        return document.querySelector('div[contenteditable="true"][data-tab="3"]')
+          || document.querySelector('[title*="Search" i][contenteditable="true"]')
+          || document.querySelector('[aria-label*="Search" i][contenteditable="true"]')
+          || document.querySelector('[aria-label*="Recherch" i][contenteditable="true"]');
+      };
+      const input = pick();
+      if (!input) return { ok: false, err: 'no_input' };
+      input.focus();
+      input.textContent = '';
+      input.dispatchEvent(new InputEvent('input', { bubbles: true }));
+      const dt = new DataTransfer();
+      dt.setData('text', q);
+      input.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true }));
+      input.dispatchEvent(new InputEvent('input', { bubbles: true }));
+      return { ok: true };
+    }, query);
+  };
+
+  if (!(await findSearch())) {
+    if (logger) logger('⚠️ Panneau recherche introuvable (headless)', 'warn');
+    return false;
   }
 
   try {
-    const ok = await withTimeout(page.evaluate(async (q) => {
-      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-      const paste = (el, text) => {
-        el.focus();
-        const dt = new DataTransfer();
-        dt.setData('text', text);
-        el.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true }));
-      };
-      let input = document.querySelector('div[contenteditable="true"][data-tab="3"]')
-        || document.querySelector('#side div[contenteditable="true"][role="textbox"]');
-      if (!input) return { ok: false, err: 'no_input' };
-      paste(input, q);
-      await sleep(2200);
-      const nodes = [...document.querySelectorAll('[data-testid="cell-frame-container"], div[role="listitem"]')];
-      if (nodes[0]) { nodes[0].click(); await sleep(600); return { ok: true, via: 'paste_row' }; }
-      return { ok: false, err: 'no_row' };
-    }, query), 20000, 'searchUI paste');
-    if (ok.ok) {
-      if (logger) logger(`🔍 Chat ouvert via collage recherche (${ok.via})`, 'info');
-      await sleep(1000);
+    const typed = await typeInSearch();
+    if (!typed.ok) {
+      if (logger) logger(`⚠️ Recherche UI : ${typed.err}`, 'warn');
+      return false;
+    }
+    await sleep(2500);
+    const clicked = await page.evaluate((q) => {
+      const norm = (s) => (s || '').replace(/\D/g, '');
+      const qn = norm(q);
+      const click = (el) => { if (el) { el.click(); return true; } return false; };
+      for (const el of document.querySelectorAll('div[role="button"], button, span')) {
+        const t = (el.textContent || '').trim();
+        if (/^(discuter|message|discuss)$/i.test(t) || /discuter avec/i.test(t)) {
+          if (click(el)) return 'discuss';
+        }
+      }
+      for (const row of document.querySelectorAll('[data-testid="cell-frame-container"], div[role="listitem"]')) {
+        const txt = norm(row.textContent || '');
+        if (txt.includes(qn) || txt.includes(qn.slice(-9))) {
+          if (click(row)) return 'row';
+        }
+      }
+      const first = document.querySelector('[data-testid="cell-frame-container"]');
+      if (click(first)) return 'first_row';
+      return null;
+    }, query);
+    if (clicked) {
+      if (logger) logger(`🔍 Chat ouvert via barre de recherche (${clicked})`, 'info');
+      await sleep(1200);
       return true;
     }
-    if (logger) logger(`⚠️ Recherche UI collage : ${ok.err}`, 'warn');
+    if (logger) logger('⚠️ Recherche : aucun résultat cliquable', 'warn');
   } catch (e) {
-    if (logger) logger(`⚠️ Recherche UI collage : ${e.message}`, 'warn');
+    if (logger) logger(`⚠️ Recherche UI : ${e.message}`, 'warn');
   }
   return false;
 }
@@ -869,6 +941,19 @@ async function deliverOutboundMessage(client, sendChatId, text, label, chatObj, 
       return await clientSend();
     }
   }
+}
+
+
+async function sendSingleOutbound(client, chatId, text, label, logger, prefetchedChat, opts = {}) {
+  const pn = chatId.split('@')[0].replace(/\D/g, '');
+  const useUi = process.env.UI_SEND_OPENER !== '0' && (opts.viaUi || label === 'hey-ui' || label === 'opener-ui');
+  if (useUi && client.pupPage && (label.includes('hey') || label.includes('opener') || opts.viaUi)) {
+    await openChatViaStore(client, pn, logger);
+    const uiOk = await sendTextViaComposerUI(client.pupPage, text, logger, label);
+    if (uiOk) return { id: 'ui-sent', verified: true, viaUi: true };
+    if (logger) logger(`⚠️ Envoi UI échoué (${label}) — repli API`, 'warn');
+  }
+  return sendAndVerify(client, chatId, text, label, logger, prefetchedChat, pn, opts);
 }
 
 async function sendAndVerify(client, chatId, text, label, logger, chatForTyping = null, phoneDigits = null, opts = {}) {
@@ -1337,9 +1422,13 @@ class BotAccount {
       }
     }
     const ackSoft = !!((opts.coldContact || opts.manualOpener) && useAckColdSoft());
-    const doSend = async (text, label, useTypingChat) => {
+    const doSend = async (text, label, useTypingChat, extra = {}) => {
       const pn = chatId.split('@')[0].replace(/\D/g, '');
-      const result = await sendAndVerify(this.client, chatId, text, label, this.log.bind(this), useTypingChat, pn, { ackSoft });
+      const sendLabel = extra.viaUi ? 'hey-ui' : label;
+      const result = await sendSingleOutbound(
+        this.client, chatId, text, sendLabel, this.log.bind(this), useTypingChat,
+        { ackSoft, viaUi: extra.viaUi, manualOpener: opts.manualOpener }
+      );
       ids.push(result.id);
       return result.id;
     };
@@ -1400,9 +1489,6 @@ class BotAccount {
     );
     const linkBase = personalizeMessage((link ?? contact.link ?? '').trim(), contact);
     const { rawMsg, link: personalizedLink, combined } = prepareOutboundContent(rawMsgBase, linkBase);
-    if (combined && linkBase) {
-      this.log('📨 Envoi en 1 message (texte + lien combinés)', 'info');
-    }
     const useOpener = shouldUseManualOpener(number, isColdContact);
     const openerText = useOpener ? getColdOpenerText() : '';
     const splitRoute = useManualRouteSplit() && combined && !!(linkBase && linkBase.trim());
@@ -1416,18 +1502,30 @@ class BotAccount {
     if (!(await this._waitForHourlyCapacity(msgCount))) {
       throw new Error('Envoi annulé : limite horaire');
     }
+    if (splitRoute && openerText) {
+      this.log('📨 Parcours manuel : Hey → texte → lien (3 messages)', 'info');
+    } else if (splitRoute) {
+      this.log('📨 Parcours : texte puis lien (2 messages)', 'info');
+    }
     if (useOpener && openerText) {
       this.log(`👋 Étape 1 (comme manuel) : "${openerText}" puis campagne`, 'info');
       await sleep(rand(400, 1200));
-    } else if (combined) {
-      this.log('📨 Envoi direct (déjà contacté avec succès avant)', 'info');
     }
     this._recordFirstSend();
     const sendOpts = { coldContact: isColdContact || useOpener, manualOpener: useOpener };
     let result;
     const sendId = cusChatId;
     if (openerText) {
-      const openerResult = await this._sendMessage(sendId, openerText, '', prefetchedChat, sendOpts);
+      let openerResult;
+      if (process.env.UI_SEND_OPENER !== '0') {
+        await openChatViaStore(this.client, number, this.log.bind(this));
+        const uiHey = await sendTextViaComposerUI(this.client.pupPage, openerText, this.log.bind(this), 'hey');
+        openerResult = uiHey
+          ? { messageCount: 1, ids: ['ui-sent'], lastId: 'ui-sent' }
+          : await this._sendMessage(sendId, openerText, '', prefetchedChat, { ...sendOpts, manualOpener: true });
+      } else {
+        openerResult = await this._sendMessage(sendId, openerText, '', prefetchedChat, sendOpts);
+      }
       await sleep(COLD_OPENER_DELAY_MS);
       if (splitRoute) {
         const textOnly = personalizeMessage((message ?? contact.message ?? '').trim() || process.env.DEFAULT_MESSAGE || '', contact);
