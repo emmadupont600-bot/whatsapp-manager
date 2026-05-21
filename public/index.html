@@ -1014,14 +1014,33 @@ function applyStatus(r) {
   }).join('');
 }
 
-function updateQR(qr,ready,acct) {
-  if (!document.getElementById('page-connection').classList.contains('active')||currentAccount!==acct) return;
-  const wrap=document.getElementById('qr-wrap');
-  if (ready) { wrap.innerHTML='<div class="qr-placeholder" style="color:var(--green);border-color:var(--green)">✓ WhatsApp Connecté !</div><span class="qr-badge connected"><span class="dot"></span>Connecté</span>'; }
-  else if (qr&&qr!==lastQr[acct]) { lastQr[acct]=qr; wrap.innerHTML=`<img src="${qr}" alt="QR"><span class="qr-badge scanning">📷 Scannez maintenant</span>`; }
-  else if (!qr&&!ready) { wrap.innerHTML='<div class="qr-placeholder">⌛ Génération QR...<br><small style="margin-top:8px;display:block">~30 secondes</small></div>'; }
-}
+function updateQR(qr, ready, acct) {
+  // Ne rien faire si on n'est pas sur la page connexion du bon compte
+  if (!document.getElementById('page-connection').classList.contains('active')) return;
+  if (currentAccount !== acct) return;
 
+  const wrap = document.getElementById('qr-wrap');
+
+  if (ready) {
+    wrap.innerHTML = `<div class="qr-placeholder" style="color:var(--green);border-color:var(--green)">
+      ✅ WhatsApp Connecté !</div>
+      <span class="qr-badge connected"><span class="dot"></span>Connecté</span>`;
+    lastQr[acct] = null; // reset pour regen si déco
+  } else if (qr) {
+    if (qr !== lastQr[acct]) {
+      lastQr[acct] = qr;
+      // Détecter si c'est du base64 ou une URL
+      const src = qr.startsWith('data:') ? qr : `data:image/png;base64,${qr}`;
+      wrap.innerHTML = `<img src="${src}" alt="QR" style="border-radius:var(--radius);background:#fff;padding:10px;width:220px;height:220px">
+        <span class="qr-badge scanning">Scannez maintenant</span>`;
+    }
+  } else {
+    // Pas encore de QR
+    wrap.innerHTML = `<div class="qr-placeholder">Génération QR...<br>
+      <small style="margin-top:8px;display:block">~30 secondes</small></div>`;
+    lastQr[acct] = null;
+  }
+}
 async function fetchStatus() {
   try {
     const r=await fetch(`/api/${currentAccount}/status`).then(r=>r.json());
