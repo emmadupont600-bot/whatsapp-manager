@@ -21,23 +21,21 @@ npm start
 5. Variables d'environnement optionnelles :
    - `MIN_DELAY_S` : délai minimum (défaut: 45)
    - `MAX_DELAY_S` : délai maximum (défaut: 120)
-   - `AUTH_TOKEN` : protège les routes `/api/*` (header `Authorization: Bearer <token>`)
-   - `RESET_AUTH` : au redémarrage, supprime la session (`1`, `2`, `all` ou `1,2`) puis affiche un nouveau QR
-
-### Réinitialiser la session WhatsApp (session fantôme)
-
-Si les messages n'apparaissent pas sur le téléphone alors que le dashboard indique « connecté » :
-
-1. **Dashboard** → onglet Connexion → bouton **Reset Auth — Nouveau QR**
-2. Ou en ligne de commande (remplacez par **votre** URL Railway publique) :
-
-```bash
-curl https://VOTRE-APP.up.railway.app/api/health
-curl -X POST https://VOTRE-APP.up.railway.app/api/1/reset-auth
-```
-
-Si `GET /api/health` renvoie aussi `Not Found`, le déploiement actif n'a pas encore cette version — relancez un deploy depuis GitHub.
-
-Pour forcer un reset au prochain redémarrage sans shell : variable `RESET_AUTH=1`, redéployez, puis retirez la variable.
+   - `WA_WEB_VERSION` : version WhatsApp Web épinglée (évite session fantôme)
+   - `AUTO_START_ON_READY=0` : désactive le démarrage auto de la queue après connexion
+   - `RESET_AUTH=1` : supprime la session au redémarrage (puis retirez la variable)
 6. Cliquez **Deploy** → attendez le build (~3 min)
 7. Ouvrez l'URL publique Railway → scannez le QR code
+
+### Envoi silencieux / session fantôme
+
+Si les logs affichent « Envoyé » mais rien sur le téléphone, ou le **même ID** pour texte et lien :
+
+1. **Pause** la queue immédiatement
+2. Sur le téléphone : déconnectez **tous** les Appareils connectés WhatsApp Web
+3. Dashboard → **Reset Auth** → rescannez le QR
+4. **Message test** vers votre propre numéro — doit apparaître dans vos conversations
+5. Bouton **Vérifier synchronisation session** → doit afficher OK
+6. Si le numéro a été **restreint** par WhatsApp : attendez 24–48 h ou utilisez le **Compte 2**
+
+Le bot détecte automatiquement les IDs dupliqués et arrête la queue pour éviter d'envoyer dans le vide.

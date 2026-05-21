@@ -571,6 +571,8 @@ tr:hover td{background:var(--surface2)}
           Si le bot semble connecté mais les messages n'apparaissent pas sur votre téléphone, supprimez la session et rescannez un nouveau QR.
         </p>
         <button class="btn btn-danger" id="btn-reset-auth" onclick="resetAuth()">🔑 Reset Auth — Nouveau QR</button>
+                <div id="session-health-banner" style="display:none;margin-top:12px;padding:10px 14px;border-radius:var(--radius);font-size:13px;line-height:1.5"></div>
+        <button class="btn btn-ghost" style="margin-top:10px" onclick="checkSession()">🔍 Vérifier synchronisation session</button>
         <span id="reset-auth-status" style="font-size:12px;color:var(--muted);margin-left:10px"></span>
       </div>
     </div>
@@ -1202,6 +1204,28 @@ function applyStatus(r) {
   updateQR(r.qr, readyShown, acct);
   paintConnBadge(acct, readyShown);
 
+  const sessBanner = document.getElementById('session-health-banner');
+  if (sessBanner && document.getElementById('page-connection')?.classList.contains('active')) {
+    if (!r.ready) { sessBanner.style.display = 'none'; }
+    else if (r.sessionHealthy === false) {
+      sessBanner.style.display = 'block';
+      sessBanner.style.background = 'color-mix(in oklch, var(--red) 12%, transparent)';
+      sessBanner.style.color = 'var(--red)';
+      sessBanner.textContent = '⚠️ Session non synchronisée — envois silencieux possibles. Reset Auth, message test vers vous-même, ou Compte 2 si numéro restreint.';
+    } else if (r.sessionHealthy === null) {
+      sessBanner.style.display = 'block';
+      sessBanner.style.background = 'color-mix(in oklch, var(--yellow) 12%, transparent)';
+      sessBanner.style.color = 'var(--yellow)';
+      sessBanner.textContent = '⏳ Vérification de la session en cours (~20 s après connexion)...';
+    } else {
+      sessBanner.style.display = 'block';
+      sessBanner.style.background = 'color-mix(in oklch, var(--green) 12%, transparent)';
+      sessBanner.style.color = 'var(--green)';
+      sessBanner.textContent = '✅ Session validée — les messages devraient apparaître sur votre téléphone.';
+    }
+  }
+
+
   if (!document.getElementById('page-dashboard').classList.contains('active')) return;
   // Ne pas écraser le dashboard avec l'autre compte (évite le clignotement Connecté/Déconnecté)
   if (acct !== currentAccount) return;
@@ -1333,6 +1357,18 @@ function updateQR(qr, ready, acct) {
       <small style="margin-top:8px;display:block">~30 secondes</small></div>`;
     lastQr[acct] = null;
   }
+}
+
+
+async function checkSession() {
+  const st = document.getElementById('session-health-banner');
+  if (st) { st.style.display = 'block'; st.textContent = '⏳ Vérification...'; }
+  try {
+    const r = await fetch(`/api/${currentAccount}/check-session`, { method: 'POST' }).then(x => x.json().catch(() => ({})));
+    if (r.ok) alert('Session WhatsApp synchronisée — vous pouvez lancer la queue.');
+    else alert(r.error || 'Session non fiable — faites Reset Auth ou attendez si le numéro est restreint.');
+  } catch (e) { alert('Erreur : ' + e.message); }
+  fetchStatus();
 }
 
 async function resetAuth() {
