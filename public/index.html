@@ -789,9 +789,14 @@ const Q_PER_PAGE = 50;
 let pendingCSVFiles = [];
 // Notifications
 let notifEnabled = Notification.permission === 'granted';
-let prevRunning = {1:false,2:false};
-let prevLimitReached = {1:false,2:false};
 let notifBannerTimer = null;
+let lastBannerKey = '';
+const notifCooldown = {};
+// Connexion affichée (évite clignotement si WhatsApp reconnecte brièvement)
+const connDisplay = { 1: { shown: null, timer: null }, 2: { shown: null, timer: null } };
+const DISCONNECT_GRACE_MS = 5000;
+const STATUS_BADGE_CONNECTED = '<span class="badge badge-green"><span class="dot"></span>Connecté</span>';
+const STATUS_BADGE_DISCONNECTED = '<span class="badge badge-red"><span class="dot"></span>Déconnecté</span>';
 // Blacklist state
 let blData = [];
 let blPage = 1;
@@ -844,20 +849,87 @@ function toggleNotifications() {
   else requestNotifPermission();
 }
 
-function showNotifBanner(icon, title, body) {
+function showNotifBanner(icon, title, body, key='') {
+  const k = key || title;
+  const b = document.getElementById('notif-banner');
+  if (b.classList.contains('show') && lastBannerKey === k) return;
+  lastBannerKey = k;
   document.getElementById('notif-icon').textContent = icon;
   document.getElementById('notif-text').innerHTML = `<strong>${title}</strong>${body?`<br><span style="font-size:12px;color:var(--muted)">${body}</span>`:''}`;
-  const b = document.getElementById('notif-banner');
   b.classList.add('show');
   if (notifBannerTimer) clearTimeout(notifBannerTimer);
-  notifBannerTimer = setTimeout(closeNotifBanner, 5000);
+  notifBannerTimer = setTimeout(() => { closeNotifBanner(); lastBannerKey = ''; }, 5000);
 }
 function closeNotifBanner() { document.getElementById('notif-banner').classList.remove('show'); }
 
-function fireNotification(title, body, icon='') {
-  showNotifBanner(icon||'🔔', title, body);
+function fireNotification(title, body, icon='', key='') {
+  const k = key || title;
+  const now = Date.now();
+  if (notifCooldown[k] && now - notifCooldown[k] < 120000) return;
+  notifCooldown[k] = now;
+  showNotifBanner(icon||'🔔', title, body, k);
   if (notifEnabled && Notification.permission === 'granted' && document.hidden) {
     new Notification(title, { body, icon: '/favicon.ico', badge: '/favicon.ico' });
+  }
+}
+
+function getStableReady(acct, ready) {
+  const c = connDisplay[acct] || (connDisplay[acct] = { shown: null, timer: null });
+  if (ready) {
+    if (c.timer) { clearTimeout(c.timer); c.timer = null; }
+    if (c.shown !== true) { c.shown = true; refreshConnUI(acct); }
+    return true;
+  }
+  if (c.shown === false) return false;
+  if (c.shown === true) {
+    if (!c.timer) {
+      c.timer = setTimeout(() => {
+        c.shown = false;
+        c.timer = null;
+        refreshConnUI(acct);
+      }, DISCONNECT_GRACE_MS);
+    }
+    return true;
+  }
+  c.shown = false;
+  return false;
+}
+
+function paintStatusBadge(ready) {
+  const el = document.getElementById('status-badge');
+  const state = ready ? '1' : '0';
+  if (el.dataset.state === state) return;
+  el.dataset.state = state;
+  el.innerHTML = ready ? STATUS_BADGE_CONNECTED : STATUS_BADGE_DISCONNECTED;
+}
+
+function paintConnBadge(acct, ready) {
+  const el = document.getElementById(acct === 1 ? 'conn-badge-1' : 'conn-badge-2');
+  if (!el) return;
+  const label = ready ? '✅' : `N°${acct}`;
+  if (el.textContent === label) return;
+  el.textContent = label;
+}
+
+function paintQuotaBadge(pctQ) {
+  const qBadge = document.getElementById('quota-badge');
+  const tier = pctQ >= 100 ? 'full' : pctQ >= 70 ? 'warn' : 'ok';
+  if (qBadge.dataset.tier === tier) return;
+  qBadge.dataset.tier = tier;
+  if (tier === 'full') qBadge.innerHTML = '<span class="badge badge-red">⛔ Quota atteint</span>';
+  else if (tier === 'warn') qBadge.innerHTML = '<span class="badge badge-yellow">⚠️ Bientôt atteint</span>';
+  else qBadge.innerHTML = '<span class="badge badge-green">✓ OK</span>';
+}
+
+function refreshConnUI(acct) {
+  const ready = connDisplay[acct].shown === true;
+  paintConnBadge(acct, ready);
+  if (acct === currentAccount && document.getElementById('page-dashboard').classList.contains('active')) {
+    paintStatusBadge(ready);
+  }
+  if (acct === currentAccount && document.getElementById('page-connection').classList.contains('active')) {
+    const r = lastStatus[acct];
+    if (r) updateQR(r.qr, ready, acct);
   }
 }
 
@@ -925,18 +997,15 @@ function applyStatus(r) {
   lastStatus[acct] = r;
 
   if (prev.running && !r.running && !r.paused && r.pending === 0 && r.total > 0) {
-    fireNotification('✅ Queue terminée', `Compte ${acct} — ${r.stats.sent} messages envoyés.`, '✅');
+    fireNotification('✅ Queue terminée', `Compte ${acct} — ${r.stats.sent} messages envoyés.`, '✅', `queue-done-${acct}`);
   }
   if (!prev.limitReached && r.limitReached) {
-    fireNotification('⛔ Quota atteint', `Compte ${acct} — ${r.dailySent}/${r.dailyLimit} msgs. Reprise dans ${formatCountdown(r.resetInMs)}.`, '⛔');
+    fireNotification('⛔ Quota atteint', `Compte ${acct} — ${r.dailySent}/${r.dailyLimit} msgs. Reprise dans ${formatCountdown(r.resetInMs)}.`, '⛔', `quota-${acct}`);
   }
 
-
-    // FIX: QR + badges toujours mis à jour peu importe la page active
-  updateQR(r.qr, r.ready, acct);
-  const _b1=document.getElementById('conn-badge-1'),_b2=document.getElementById('conn-badge-2');
-  if (acct===1&&_b1) _b1.textContent=r.ready?'✅':'N°1';
-  if (acct===2&&_b2) _b2.textContent=r.ready?'✅':'N°2';
+  const readyShown = getStableReady(acct, !!r.ready);
+  updateQR(r.qr, readyShown, acct);
+  paintConnBadge(acct, readyShown);
 
   if (!document.getElementById('page-dashboard').classList.contains('active')) return;
   // Ne pas écraser le dashboard avec l'autre compte (évite le clignotement Connecté/Déconnecté)
@@ -945,9 +1014,7 @@ function applyStatus(r) {
   document.getElementById('stat-sent').textContent    = r.stats.sent;
   document.getElementById('stat-pending').textContent  = r.pending;
   document.getElementById('stat-failed').textContent   = r.stats.failed+r.stats.skipped;
-  document.getElementById('status-badge').innerHTML    = r.ready
-    ? '<span class="badge badge-green"><span class="dot"></span>Connecté</span>'
-    : '<span class="badge badge-red"><span class="dot"></span>Déconnecté</span>';
+  paintStatusBadge(readyShown);
 
   const pctQ = r.dailyLimit > 0 ? Math.min(100, Math.round(r.dailySent / r.dailyLimit * 100)) : 0;
   document.getElementById('quota-count').textContent = `${r.dailySent} / ${r.dailyLimit}`;
@@ -957,10 +1024,7 @@ function applyStatus(r) {
   bar.className = 'quota-fill' + (pctQ >= 100 ? ' full' : pctQ >= 70 ? '' : ' ok');
   document.getElementById('limit-input').value = r.dailyLimit;
 
-  const qBadge = document.getElementById('quota-badge');
-  if (pctQ >= 100) qBadge.innerHTML = '<span class="badge badge-red">⛔ Quota atteint</span>';
-  else if (pctQ >= 70) qBadge.innerHTML = '<span class="badge badge-yellow">⚠️ Bientôt atteint</span>';
-  else qBadge.innerHTML = '<span class="badge badge-green">✓ OK</span>';
+  paintQuotaBadge(pctQ);
 
   if (countdownInterval) clearInterval(countdownInterval);
   if (r.windowStart && r.resetInMs > 0) {
@@ -1046,12 +1110,18 @@ function updateQR(qr, ready, acct) {
   }
 }
 async function fetchStatus() {
-  for (const id of [1, 2]) {
-    try {
-      const r = await fetch(`/api/${id}/status`).then(r => r.json());
-      applyStatus(r);
-    } catch(e) {}
-  }
+  try {
+    const r = await fetch(`/api/${currentAccount}/status`).then(res => res.json());
+    applyStatus(r);
+  } catch(e) {}
+  const other = currentAccount === 1 ? 2 : 1;
+  try {
+    const r = await fetch(`/api/${other}/status`).then(res => res.json());
+    const acct = r.id || other;
+    lastStatus[acct] = r;
+    getStableReady(acct, !!r.ready);
+    paintConnBadge(acct, connDisplay[acct].shown === true);
+  } catch(e) {}
 }
 
 /* ═══════════════════════════════════════════════════
