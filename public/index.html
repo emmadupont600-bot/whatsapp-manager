@@ -864,7 +864,14 @@ function fireNotification(title, body, icon='') {
 /* ═══════════════════════════════════════════════════
    NAVIGATION
 ═══════════════════════════════════════════════════ */
-function switchAccount(n) { currentAccount = n; }
+function switchAccount(n) {
+  currentAccount = n;
+  if (document.getElementById('page-dashboard').classList.contains('active')) {
+    const cached = lastStatus[n];
+    if (cached) applyStatus(cached);
+    else fetchStatus();
+  }
+}
 
 function showPage(name, el) {
   document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
@@ -932,6 +939,8 @@ function applyStatus(r) {
   if (acct===2&&_b2) _b2.textContent=r.ready?'✅':'N°2';
 
   if (!document.getElementById('page-dashboard').classList.contains('active')) return;
+  // Ne pas écraser le dashboard avec l'autre compte (évite le clignotement Connecté/Déconnecté)
+  if (acct !== currentAccount) return;
 
   document.getElementById('stat-sent').textContent    = r.stats.sent;
   document.getElementById('stat-pending').textContent  = r.pending;
