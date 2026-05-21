@@ -887,4 +887,8 @@ function showPage(name, el) {
   if (name==='queue')      { document.getElementById('queue-title').textContent = `Queue — ${label}`; loadQueue(); }
   if (name==='groups')     loadGroups();
   if (name==='overview')   renderOverview();
-  if (name==='history')    loadHistory();if (name==='stats')      { if (!window.Chart) loadChartJS(); else loadStats(); }  if (n
+    if (name==='history')  loadHistory();
+  if (name==='stats')    { if (!window.Chart) loadChartJS(); else loadStats(); }
+  if (name==='blacklist') loadBlacklist();
+  if (name==='settings') loadSettingsFromConfig();
+}
