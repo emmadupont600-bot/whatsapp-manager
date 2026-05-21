@@ -37,12 +37,9 @@ cleanUploadsDir();
 setInterval(cleanUploadsDir, MAX_AGE_MS);
 
 // ─── FIX #8 : Middleware d'authentification par token Bearer ─────────────────
-// Définir AUTH_TOKEN dans les variables d'environnement pour activer la
-// protection. Si la variable n'est pas définie, les routes sont publiques
-// (comportement rétrocompatible en développement local).
 const AUTH_TOKEN = process.env.AUTH_TOKEN || '';
 function authMiddleware(req, res, next) {
-  if (!AUTH_TOKEN) return next(); // pas de token configuré → accès libre
+  if (!AUTH_TOKEN) return next();
   const header = req.headers['authorization'] || '';
   const token  = header.startsWith('Bearer ') ? header.slice(7) : '';
   if (token !== AUTH_TOKEN) {
@@ -50,7 +47,6 @@ function authMiddleware(req, res, next) {
   }
   next();
 }
-// Protège toutes les routes /api/*
 app.use('/api', authMiddleware);
 
 // ─── Blacklist ───────────────────────────────────────────────────────────────
@@ -113,10 +109,6 @@ function cancelSchedule(accountId) {
   if (schedules[accountId]) { clearTimeout(schedules[accountId].timerId); delete schedules[accountId]; }
 }
 
-// FIX #6 : validation stricte de la date planifiée.
-// Avant : n'importe quelle valeur était acceptée. new Date(invalid) retournait
-// NaN → ms <= 0 → setTimeout(fn, NaN) → déclenchement immédiat silencieux.
-// Après : vérification isNaN(ts) + délai minimum de 30 secondes.
 function parseScheduledAt(scheduledAt) {
   if (!scheduledAt || typeof scheduledAt !== 'string') {
     return { ok: false, error: 'scheduledAt doit être une chaîne de caractères' };
@@ -190,10 +182,6 @@ function saveLogs(id, entries) {
 }
 
 // ─── FIX #10 : dailyLimit dynamique via Proxy ────────────────────────────────
-// Avant : config.dailyLimit = { 1: ..., 2: ... } était hardcodé et ne
-// s'adaptait pas à l'ajout d'un nouveau bot.
-// Après : Proxy sur un objet d'overrides — tout ID non encore surchargé
-// retourne DEFAULT_DAILY_LIMIT, évitant undefined pour les nouveaux bots.
 const DEFAULT_DAILY_LIMIT = parseInt(process.env.DAILY_LIMIT || '300');
 const _dailyLimitOverrides = {};
 const dailyLimitMap = new Proxy(_dailyLimitOverrides, {
@@ -281,9 +269,6 @@ class BotAccount {
     this.retryCount = 0;
     this._resumeTimer   = null;
     this._logFlushTimer = null;
-    // FIX #2 : flag _starting pour éviter la race condition dans runQueue().
-    // running seul ne suffit pas car entre deux await, une seconde invocation
-    // peut passer la vérification avant que running soit mis à true.
     this._starting  = false;
     this.state = {
       qr: null, ready: false, running: false, paused: false,
@@ -501,9 +486,6 @@ class BotAccount {
   async _delaySession() { const ms=rand(config.sessionPauseMin,config.sessionPauseMax)*1000; this.log(`☕ Pause session : ${(ms/60000).toFixed(0)}min`,'warn'); await sleep(ms); }
   async _typing(chat) { try { await chat.sendStateTyping(); await sleep(rand(config.typingMin,config.typingMax)); await chat.clearState(); } catch(e) {} }
 
-  // FIX : _sendMessage vérifie l'accusé de réception WA.
-  // sendMessage() peut retourner null/undefined si la session est dégradée
-  // sans lever d'exception, ce qui faisait afficher un faux "✅ Envoyé".
   async _sendMessage(chatId, rawMsg, link) {
     const chat = await this.client.getChatById(chatId);
 
@@ -536,7 +518,6 @@ class BotAccount {
         const sentLink = await this.client.sendMessage(chatId, parts.url);
         return assertSent(sentLink, 'lien');
       } else {
-        // Message = URL pure : envoie l'URL seule sans chaîne vide en premier
         await this._typing(chat);
         const sentLink = await this.client.sendMessage(chatId, parts.url);
         return assertSent(sentLink, 'url-seule');
@@ -560,9 +541,6 @@ class BotAccount {
     this.log(`🧪 Message de test envoyé à +${number} [id: ${msgId}]`,'success');
   }
 
-  // FIX #2 : protection contre la race condition.
-  // _starting est mis à true de façon synchrone avant le 1er await,
-  // ce qui empêche une seconde invocation de passer la garde.
   async runQueue(relayBot) {
     if (this.state.running || this._starting) return;
     this._starting = true;
@@ -661,13 +639,10 @@ class BotAccount {
     this._saveQueue();
   }
 
-  // FIX #5 : blacklist et sentHistory chargés UNE SEULE FOIS avant la boucle.
-  // Avant : loadBlacklist() et loadSentHistory() étaient appelés à chaque
-  // itération → O(n) lectures disque pour n contacts, risque de corruption.
   importCSV(content, defaultMessage, defaultLink, forceIncludeDuplicates = []) {
     const records = csv.parse(content, { columns: true, skip_empty_lines: true });
-    const blacklistCache    = loadBlacklist();      // chargé une seule fois
-    const sentHistoryCache  = loadSentHistory();    // chargé une seule fois
+    const blacklistCache    = loadBlacklist();
+    const sentHistoryCache  = loadSentHistory();
 
     let added=0, blacklisted=0, skippedQueue=0;
     const duplicates=[];
@@ -762,10 +737,6 @@ class BotAccount {
 // ─── Deux comptes ─────────────────────────────────────────────────────────────
 const bots={1:new BotAccount(1),2:new BotAccount(2)};
 
-// FIX #7 : getBot() retourne null pour tout ID invalide ou inconnu.
-// Avant : retournait bots[1] en fallback silencieux → un client avec
-// account=3 opérait sur le bot 1 sans avertissement.
-// Après : requireBot() répond 404 JSON avec la liste des comptes valides.
 function getBot(req) {
   const id = parseInt(req.params.account || req.query.account || '');
   return (!isNaN(id) && bots[id]) ? bots[id] : null;
@@ -838,6 +809,12 @@ app.delete('/api/:account/logs', (req,res)=>{
   res.json({ok:true});
 });
 
+// ─── /api/stats — avec détail par compte et totalReplies ─────────────────────
+// FIX stats : ajout de `accounts` (détail par compte) et `totalReplies`
+// (somme de repliesReceived pour tous les bots en mémoire).
+// Avant : la route ne retournait ni l'un ni l'autre → le tableau "Détail par
+// compte" affichait toujours "Pas encore de données" et le KPI "Réponses
+// reçues" restait à "—" même après des envois.
 app.get('/api/stats', (req,res)=>{
   const sessions=loadSessions();
   const totalSent=sessions.reduce((s,x)=>s+(x.sent||0),0);
@@ -847,7 +824,34 @@ app.get('/api/stats', (req,res)=>{
   const deliveryRate=total>0?Math.round(totalSent/total*100):0;
   const skipRate=total>0?Math.round(totalSkipped/total*100):0;
   const last30=sessions.slice(-30).map(s=>({date:s.date,botId:s.botId,sent:s.sent||0,skipped:s.skipped||0,failed:s.failed||0,duration:s.duration||0}));
-  res.json({totalSent,totalSkipped,totalFailed,total,deliveryRate,skipRate,sessions:last30});
+
+  // totalReplies : somme des réponses reçues sur tous les bots en mémoire
+  const totalReplies = Object.values(bots).reduce((sum, b) => sum + (b.state.repliesReceived || 0), 0);
+
+  // accounts : aggrège les stats sessions par botId + replies en mémoire
+  const byAccount = {};
+  for (const s of sessions) {
+    const id = s.botId || 1;
+    if (!byAccount[id]) byAccount[id] = { account: id, sent: 0, failed: 0, skipped: 0, replies: 0 };
+    byAccount[id].sent    += s.sent    || 0;
+    byAccount[id].failed  += s.failed  || 0;
+    byAccount[id].skipped += s.skipped || 0;
+  }
+  // Ajoute les réponses reçues depuis la mémoire des bots actifs
+  for (const b of Object.values(bots)) {
+    if (!byAccount[b.id]) byAccount[b.id] = { account: b.id, sent: 0, failed: 0, skipped: 0, replies: 0 };
+    byAccount[b.id].replies = b.state.repliesReceived || 0;
+  }
+  const accounts = Object.values(byAccount).sort((a,b)=>a.account-b.account);
+
+  res.json({
+    totalSent, totalSkipped, totalFailed, total,
+    deliveryRate, skipRate,
+    totalReplies,
+    totalSessions: sessions.length,
+    sessions: last30,
+    accounts
+  });
 });
 
 app.get('/api/:account/queue', (req,res)=>{
@@ -873,12 +877,8 @@ app.get('/api/:account/export', (req,res)=>{
   res.send(stringify(rows,{header:true}));
 });
 
-// FIX #1 + #3 : req.file vérifié avant usage, unlinkSync dans finally.
-// Avant : req.file.path crashait si multer ne recevait pas de fichier.
-// Avant : si importCSV() levait une exception, le fichier restait sur le disque.
 app.post('/api/:account/import', upload.single('file'), (req,res)=>{
   const bot=requireBot(req,res); if(!bot) return;
-  // FIX #3 : vérification explicite de req.file
   if (!req.file) return res.status(400).json({ok:false,error:'Fichier manquant'});
   let result;
   try {
@@ -891,7 +891,6 @@ app.post('/api/:account/import', upload.single('file'), (req,res)=>{
   } catch(e){
     return res.status(400).json({ok:false,error:e.message});
   } finally {
-    // FIX #1 : suppression garantie même en cas d'erreur
     try { fs.unlinkSync(req.file.path); } catch(_) {}
   }
   if(result.duplicates.length>0&&!(JSON.parse(req.body.forceInclude||'[]').length>0)) {
@@ -939,9 +938,7 @@ app.post('/api/blacklist/remove', (req,res)=>{
   saveBlacklist(list); res.json({ok:true,total:list.length});
 });
 
-// FIX #1 + #3 : même correction que /api/:account/import
 app.post('/api/blacklist/import', upload.single('file'), (req,res)=>{
-  // FIX #3 : vérification explicite de req.file
   if (!req.file) return res.status(400).json({ok:false,error:'Fichier manquant'});
   let added=0, total=0;
   try {
@@ -957,7 +954,6 @@ app.post('/api/blacklist/import', upload.single('file'), (req,res)=>{
   } catch(e){
     return res.status(400).json({ok:false,error:e.message});
   } finally {
-    // FIX #1 : suppression garantie même en cas d'erreur
     try { fs.unlinkSync(req.file.path); } catch(_) {}
   }
   res.json({ok:true,added,total});
@@ -995,9 +991,6 @@ app.get('/api/:account/export-group/:name',async(req,res)=>{
   res.send(stringify(rows,{header:true}));
 });
 
-// FIX #4 : route legacy /api/start vérifie state.ready et reset limitReached,
-// comme le fait la route paramétrée /api/:account/start.
-// Avant : appelait runQueue() sans vérifier la connexion ni reset limitReached.
 app.get('/api/status',(req,res)=>res.json(bots[1].getStatus()));
 app.post('/api/start',(req,res)=>{
   if(!bots[1].state.ready) return res.status(400).json({ok:false,error:'Non connecté'});
