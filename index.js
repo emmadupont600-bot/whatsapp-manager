@@ -663,21 +663,28 @@ app.get('/api/:account/export', (req,res)=>{
 });
 
 // Import avec détection de doublons (2 phases)
+// FIX #1 : le fichier uploadé est supprimé dans un bloc `finally` pour garantir
+// le nettoyage même en cas d'erreur (message vide, CSV invalide, exception…)
 app.post('/api/:account/import', upload.single('file'), (req,res)=>{
+  if (!req.file) return res.status(400).json({ok:false,error:'Fichier manquant'});
+  let result;
   try {
     const content=fs.readFileSync(req.file.path,'utf-8');
     const message=(req.body.message||'').trim();
     const link=(req.body.link||'').trim();
     if(!message) return res.status(400).json({ok:false,error:'Message vide'});
     const force=JSON.parse(req.body.forceInclude||'[]');
-    const result=getBot(req).importCSV(content,message,link,force);
-    fs.unlinkSync(req.file.path);
-    if(result.duplicates.length>0&&force.length===0) {
-      res.json({ok:true,...result,needsConfirmation:true});
-    } else {
-      res.json({ok:true,...result,needsConfirmation:false});
-    }
-  } catch(e){res.status(400).json({ok:false,error:e.message});}
+    result=getBot(req).importCSV(content,message,link,force);
+  } catch(e){
+    return res.status(400).json({ok:false,error:e.message});
+  } finally {
+    try { fs.unlinkSync(req.file.path); } catch(_) {}
+  }
+  if(result.duplicates.length>0&&!(JSON.parse(req.body.forceInclude||'[]').length>0)) {
+    res.json({ok:true,...result,needsConfirmation:true});
+  } else {
+    res.json({ok:true,...result,needsConfirmation:false});
+  }
 });
 
 // Supprimer un contact de la queue
@@ -719,18 +726,27 @@ app.post('/api/blacklist/remove', (req,res)=>{
   const list=loadBlacklist().filter(p=>p.replace(/\D/g,'')!==phone);
   saveBlacklist(list); res.json({ok:true,total:list.length});
 });
+
+// FIX #1 : même correction pour /blacklist/import — finally garantit la suppression du fichier
 app.post('/api/blacklist/import', upload.single('file'), (req,res)=>{
+  if (!req.file) return res.status(400).json({ok:false,error:'Fichier manquant'});
+  let added=0, total=0;
   try {
     const content=fs.readFileSync(req.file.path,'utf-8');
     const records=csv.parse(content,{columns:true,skip_empty_lines:true});
-    const list=loadBlacklist(); let added=0;
+    const list=loadBlacklist();
     for(const row of records){
       const phone=(row.telephone||row.phone||Object.values(row)[0]||'').replace(/\D/g,'');
       if(phone&&phone.length>=8&&!list.includes(phone)){list.push(phone);added++;}
     }
-    saveBlacklist(list); fs.unlinkSync(req.file.path);
-    res.json({ok:true,added,total:list.length});
-  } catch(e){res.status(400).json({ok:false,error:e.message});}
+    saveBlacklist(list);
+    total=list.length;
+  } catch(e){
+    return res.status(400).json({ok:false,error:e.message});
+  } finally {
+    try { fs.unlinkSync(req.file.path); } catch(_) {}
+  }
+  res.json({ok:true,added,total});
 });
 
 // Config
