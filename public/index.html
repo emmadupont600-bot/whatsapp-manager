@@ -181,6 +181,8 @@ tr:hover td{background:var(--surface2)}
     <button class="nav-item" onclick="switchAccount(2);showPage('connection',this)">📱 Connexion <span class="account-badge badge-a2" id="conn-badge-2">N°2</span></button>
 
     <div class="nav-section">Outils</div>
+    <button class="nav-item" onclick="showPage('history',this)">🕓 Historique global</button>
+    <button class="nav-item" onclick="showPage('stats',this)">📈 Statistiques</button>
     <button class="nav-item" onclick="showPage('blacklist',this)">🚫 Blacklist</button>
     <button class="nav-item" onclick="showPage('overview',this)">👁 Vue d'ensemble</button>
     <button class="nav-item" onclick="showPage('settings',this)">⚙️ Paramètres</button>
@@ -246,19 +248,23 @@ tr:hover td{background:var(--surface2)}
         </div>
       </div>
 
+
       <!-- Planning -->
-      <div class="card">
-        <div class="card-title">Planifier le démarrage</div>
-        <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
-          <div class="form-group" style="margin-bottom:0;flex:1;min-width:200px">
-            <label>Date & heure de démarrage</label>
-            <input type="datetime-local" id="schedule-dt" style="width:100%">
-          </div>
-          <button class="btn btn-ghost" onclick="scheduleBot()" style="flex-shrink:0">📅 Planifier</button>
-          <button class="btn btn-danger" onclick="cancelSchedule()" style="flex-shrink:0;display:none" id="btn-cancel-schedule">✕ Annuler</button>
-        </div>
-        <div id="schedule-status" style="margin-top:8px"></div>
-      </div>
+<div class="card" id="schedule-card">
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+    <div class="card-title" style="margin-bottom:0">📅 Planifier le démarrage</div>
+    <div id="schedule-active-badge"></div>
+  </div>
+  <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
+    <div class="form-group" style="margin-bottom:0;flex:1;min-width:200px">
+      <label>Date & heure de démarrage</label>
+      <input type="datetime-local" id="schedule-dt" style="width:100%">
+    </div>
+    <button class="btn btn-ghost" onclick="scheduleBot()" id="btn-schedule" style="flex-shrink:0">📅 Planifier</button>
+    <button class="btn btn-danger" onclick="cancelSchedule()" style="flex-shrink:0;display:none" id="btn-cancel-schedule">✕ Annuler</button>
+  </div>
+  <div id="schedule-status" style="margin-top:10px"></div>
+</div>
 
       <!-- Test message -->
       <div class="card">
@@ -348,6 +354,8 @@ tr:hover td{background:var(--surface2)}
         <div style="display:flex;gap:8px">
           <button class="btn btn-ghost" onclick="loadQueue()">Actualiser</button>
           <button class="btn btn-ghost" onclick="exportQueueFiltered()">⬇ Exporter filtrés</button>
+          <button class="btn btn-orange" onclick="exportStatus('failed')" style="font-size:12px">⬇ Échoués</button>
+          <button class="btn btn-ghost" onclick="exportStatus('replied')" style="font-size:12px;color:var(--purple)">⬇ Réponses</button>
         </div>
       </div>
 
@@ -360,6 +368,7 @@ tr:hover td{background:var(--surface2)}
             <button class="filter-btn" data-status="done" onclick="setStatusFilter('done',this)">✅ Done</button>
             <button class="filter-btn" data-status="failed" onclick="setStatusFilter('failed',this)">❌ Failed</button>
             <button class="filter-btn" data-status="skipped" onclick="setStatusFilter('skipped',this)">⏭ Skipped</button>
+            <button class="filter-btn" data-status="replied" onclick="setStatusFilter('replied',this)">💬 Réponses</button>
           </div>
           <span style="font-size:11px;color:var(--muted);margin-left:4px" id="queue-count-label"></span>
         </div>
@@ -422,6 +431,76 @@ tr:hover td{background:var(--surface2)}
         <div id="bl-pagination" style="display:flex;gap:8px;justify-content:center;margin-top:14px"></div>
       </div>
     </div>
+
+
+    <!-- ─── HISTORIQUE GLOBAL ──────────────────────── -->
+<div class="page" id="page-history">
+  <div class="page-header">
+    <h1 class="page-title">🕓 Historique global</h1>
+    <div style="display:flex;gap:8px">
+      <button class="btn btn-ghost" onclick="loadHistory()">Actualiser</button>
+      <button class="btn btn-danger" onclick="purgeHistory()" style="font-size:12px">🗑 Purger tout</button>
+    </div>
+  </div>
+
+  <div class="card" style="padding:14px 18px">
+    <div class="queue-toolbar">
+      <input type="text" id="hist-search" placeholder="🔍 Numéro, prénom, compte..." oninput="renderHistory()" style="max-width:280px">
+      <div class="status-filter">
+        <button class="filter-btn active" data-status="all" onclick="setHistFilter('all',this)">Tous</button>
+        <button class="filter-btn" data-status="done" onclick="setHistFilter('done',this)">✅ Done</button>
+        <button class="filter-btn" data-status="failed" onclick="setHistFilter('failed',this)">❌ Failed</button>
+        <button class="filter-btn" data-status="replied" onclick="setHistFilter('replied',this)">💬 Réponses</button>
+        <button class="filter-btn" data-status="skipped" onclick="setHistFilter('skipped',this)">⏭ Skipped</button>
+      </div>
+      <span style="font-size:11px;color:var(--muted);margin-left:4px" id="hist-count-label"></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Téléphone</th><th>Prénom / Nom</th><th>Compte</th><th>Statut</th><th>Réponse</th><th>Envoyé le</th><th style="width:60px">Action</th></tr></thead>
+        <tbody id="hist-table"><tr><td colspan="7" style="color:var(--muted);text-align:center;padding:24px">Cliquez sur Actualiser</td></tr></tbody>
+      </table>
+    </div>
+    <div id="hist-pagination" style="display:flex;gap:8px;justify-content:center;margin-top:14px"></div>
+  </div>
+</div>
+
+
+    <!-- ─── STATS ───────────────────────────────────── -->
+<div class="page" id="page-stats">
+  <div class="page-header">
+    <h1 class="page-title">📈 Statistiques</h1>
+    <button class="btn btn-ghost" onclick="loadStats()">Actualiser</button>
+  </div>
+
+  <div class="grid-4" id="stats-kpis">
+    <div class="card"><div class="card-title">Total envoyés</div><div class="stat-val green" id="s-total">—</div><div class="stat-label">tous comptes confondus</div></div>
+    <div class="card"><div class="card-title">Taux de livraison</div><div class="stat-val blue" id="s-rate">—</div><div class="stat-label">messages aboutis</div></div>
+    <div class="card"><div class="card-title">Réponses reçues</div><div class="stat-val purple" id="s-replies">—</div><div class="stat-label">contacts qui ont répondu</div></div>
+    <div class="card"><div class="card-title">Sessions totales</div><div class="stat-val" id="s-sessions">—</div><div class="stat-label">sessions lancées</div></div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Envois par session</div>
+    <div id="stats-chart-wrap" style="overflow-x:auto">
+      <canvas id="stats-chart" height="100"></canvas>
+    </div>
+    <div id="stats-chart-empty" style="display:none"><div class="empty-state"><div style="font-size:32px">📊</div><p>Aucune session enregistrée.</p></div></div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Détail par compte</div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Compte</th><th>Envoyés</th><th>Échoués</th><th>Ignorés</th><th>Réponses</th><th>Taux</th></tr></thead>
+        <tbody id="stats-accounts-table"><tr><td colspan="6" style="color:var(--muted);text-align:center;padding:20px">Chargement...</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+</div>
 
     <!-- ─── GROUPES ──────────────────────────────────── -->
     <div class="page" id="page-groups">
