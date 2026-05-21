@@ -73,10 +73,32 @@ const schedules = {};
 function cancelSchedule(accountId) {
   if (schedules[accountId]) { clearTimeout(schedules[accountId].timerId); delete schedules[accountId]; }
 }
+
+// FIX #6 : validation robuste de scheduledAt avant toute planification.
+// Avant : new Date(scheduledAt).getTime() retournait NaN pour une valeur
+// invalide, rendant ms <= 0 toujours true et l'erreur "Heure dans le passé"
+// silencieuse et trompeuse. Désormais on rejette explicitement les valeurs
+// non-parsables et celles qui ne sont pas dans le futur (min 30 secondes).
+function parseScheduledAt(scheduledAt) {
+  if (!scheduledAt || typeof scheduledAt !== 'string') {
+    return { ok: false, error: 'scheduledAt doit être une chaîne de caractères' };
+  }
+  const ts = Date.parse(scheduledAt);
+  if (isNaN(ts)) {
+    return { ok: false, error: `Date invalide : "${scheduledAt}". Format attendu : ISO 8601 (ex: 2026-05-22T14:00:00.000Z)` };
+  }
+  const ms = ts - Date.now();
+  if (ms < 30_000) {
+    return { ok: false, error: `La date planifiée doit être dans au moins 30 secondes (reçu : ${new Date(ts).toISOString()})` };
+  }
+  return { ok: true, ts, ms };
+}
+
 function setSchedule(bot, scheduledAt, relayBot) {
   cancelSchedule(bot.id);
-  const ms = new Date(scheduledAt).getTime() - Date.now();
-  if (ms <= 0) return { ok: false, error: 'Heure dans le passé' };
+  const parsed = parseScheduledAt(scheduledAt);
+  if (!parsed.ok) return parsed;
+  const { ts, ms } = parsed;
   const timerId = setTimeout(() => {
     delete schedules[bot.id];
     if (!bot.state.ready) { bot.log('⏰ Planning : non connecté au moment du démarrage', 'error'); return; }
@@ -84,9 +106,9 @@ function setSchedule(bot, scheduledAt, relayBot) {
     bot.log('⏰ Démarrage planifié déclenché', 'success');
     bot.runQueue(relayBot);
   }, ms);
-  schedules[bot.id] = { scheduledAt, timerId };
-  bot.log(`📅 Démarrage planifié pour ${new Date(scheduledAt).toLocaleString('fr-FR')}`, 'warn');
-  return { ok: true, scheduledAt };
+  schedules[bot.id] = { scheduledAt: new Date(ts).toISOString(), timerId };
+  bot.log(`📅 Démarrage planifié pour ${new Date(ts).toLocaleString('fr-FR')}`, 'warn');
+  return { ok: true, scheduledAt: new Date(ts).toISOString() };
 }
 
 // ─── Historique de sessions (stats globales) ─────────────────────────────────
@@ -509,10 +531,6 @@ class BotAccount {
   }
 
   // FIX #5 : blacklist et sent-history chargés une seule fois avant la boucle
-  // Avant : isBlacklisted() et isAlreadySent() relisaient le fichier JSON du
-  // disque à chaque contact importé. Sur un CSV de milliers de lignes, cela
-  // provoquait des milliers d’accès disque inutiles et risquait de corrompre
-  // les fichiers en cas d’écriture concurrente.
   importCSV(content, defaultMessage, defaultLink, forceIncludeDuplicates = []) {
     const records = csv.parse(content, { columns: true, skip_empty_lines: true });
     // Chargement unique en mémoire pour toute la durée de l'import
@@ -527,7 +545,6 @@ class BotAccount {
       const prenom=row.prenom||row.prénom||row.firstname||row.first_name||row.Prenom||row['Prénom']||'';
       const nom=row.nom||row.name||row.lastname||row.last_name||row.Nom||row['Nom']||'';
 
-      // Utilise les caches en mémoire au lieu de relire le disque
       if (isBlacklisted(phone, blacklistCache)) { blacklisted++; continue; }
       if (this.state.queue.find(c=>c.phone.replace(/\D/g,'')=== phone)) { skippedQueue++; continue; }
 
@@ -628,6 +645,12 @@ app.post('/api/:account/set-limit', (req,res)=>{
   res.json({ok:true,limit});
 });
 
+// FIX #6 : validation robuste de scheduledAt via parseScheduledAt().
+// Avant : new Date(scheduledAt).getTime() retournait NaN si la valeur était
+// invalide, ce qui rendait ms <= 0 toujours true et déclenchait l'erreur
+// "Heure dans le passé" de façon silencieuse et trompeuse.
+// Désormais : type vérifié, Date.parse() testé via isNaN(), message d'erreur
+// explicite avec le format attendu, et seuil minimum de 30 secondes dans le futur.
 app.post('/api/:account/schedule', (req,res)=>{
   const b=getBot(req); const{scheduledAt}=req.body;
   if(!scheduledAt) return res.status(400).json({ok:false,error:'scheduledAt requis'});
