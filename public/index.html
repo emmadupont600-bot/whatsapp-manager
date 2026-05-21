@@ -340,6 +340,22 @@ tr:hover td{background:var(--surface2)}
         <div class="csv-file-list" id="csv-file-list"></div>
         <div id="import-result" style="margin-top:10px;font-size:13px"></div>
 
+        <div class="card" id="dup-confirm-box" style="display:none;margin-top:14px;border-color:color-mix(in oklch,var(--yellow) 40%,var(--border))">
+          <div class="card-title" style="color:var(--yellow)">⚠️ Doublons détectés — déjà contactés</div>
+          <p style="font-size:12px;color:var(--muted);margin-bottom:10px">Ces numéros figurent dans l'historique global. Cochez ceux à réimporter quand même.</p>
+          <div class="table-wrap" style="max-height:220px;overflow-y:auto;margin-bottom:12px">
+            <table>
+              <thead><tr><th style="width:36px"><input type="checkbox" id="dup-select-all" onchange="toggleDupSelectAll(this.checked)"></th><th>Téléphone</th><th>Prénom</th><th>Dernier envoi</th><th>Compte</th></tr></thead>
+              <tbody id="dup-table"></tbody>
+            </table>
+          </div>
+          <div class="btn-row">
+            <button class="btn btn-primary" onclick="confirmDuplicatesSelected()">✓ Importer la sélection</button>
+            <button class="btn btn-ghost" onclick="confirmDuplicatesAll()">Tout inclure</button>
+            <button class="btn btn-ghost" onclick="dismissDuplicatePanel()">Ignorer — garder le reste</button>
+          </div>
+        </div>
+
         <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
           <button class="btn btn-primary" id="btn-import-all" onclick="importAllCSV()" style="display:none">📤 Importer tous les fichiers</button>
           <button class="btn btn-danger" id="btn-clear-files" onclick="clearCSVFiles()" style="display:none">✕ Effacer la liste</button>
@@ -377,8 +393,8 @@ tr:hover td{background:var(--surface2)}
       <div class="card">
         <div class="table-wrap">
           <table>
-            <thead><tr><th>Téléphone</th><th>Prénom / Nom</th><th>Statut</th><th>Message</th><th>Envoyé le</th><th style="width:60px">Action</th></tr></thead>
-            <tbody id="queue-table"><tr><td colspan="6" style="color:var(--muted);text-align:center;padding:24px">Cliquez sur Actualiser</td></tr></tbody>
+            <thead><tr><th>Téléphone</th><th>Prénom / Nom</th><th>Statut</th><th>Répondu</th><th>Message</th><th>Envoyé le</th><th style="width:60px">Action</th></tr></thead>
+            <tbody id="queue-table"><tr><td colspan="7" style="color:var(--muted);text-align:center;padding:24px">Cliquez sur Actualiser</td></tr></tbody>
           </table>
         </div>
         <div id="queue-pagination" style="display:flex;gap:8px;justify-content:center;margin-top:14px"></div>
@@ -450,8 +466,8 @@ tr:hover td{background:var(--surface2)}
         <button class="filter-btn active" data-status="all" onclick="setHistFilter('all',this)">Tous</button>
         <button class="filter-btn" data-status="done" onclick="setHistFilter('done',this)">✅ Done</button>
         <button class="filter-btn" data-status="failed" onclick="setHistFilter('failed',this)">❌ Failed</button>
-        <button class="filter-btn" data-status="replied" onclick="setHistFilter('replied',this)">💬 Réponses</button>
-        <button class="filter-btn" data-status="skipped" onclick="setHistFilter('skipped',this)">⏭ Skipped</button>
+        <button class="filter-btn" data-status="bot1" onclick="setHistFilter('bot1',this)">Compte 1</button>
+        <button class="filter-btn" data-status="bot2" onclick="setHistFilter('bot2',this)">Compte 2</button>
       </div>
       <span style="font-size:11px;color:var(--muted);margin-left:4px" id="hist-count-label"></span>
     </div>
@@ -590,7 +606,7 @@ const HIST_PER_PAGE = 50;
 async function loadHistory() {
   document.getElementById('hist-table').innerHTML = '<tr><td colspan="7" style="color:var(--muted);text-align:center;padding:24px">⏳ Chargement...</td></tr>';
   try {
-    const r = await fetch('/api/sent-history').then(r=>r.json());
+    const r = await fetch('/api/sent-history?limit=50000').then(r=>r.json());
     histData = Array.isArray(r) ? r : (r.items||r.history||[]);
     histPage = 1;
     renderHistory();
@@ -609,11 +625,13 @@ function setHistFilter(status, btn) {
 function renderHistory() {
   histSearch = (document.getElementById('hist-search').value||'').toLowerCase();
   let filtered = histData;
-  if (histFilter !== 'all') filtered = filtered.filter(c=>c.status===histFilter);
+  if (histFilter === 'bot1') filtered = filtered.filter(c => Number(c.botId || c.account) === 1);
+  else if (histFilter === 'bot2') filtered = filtered.filter(c => Number(c.botId || c.account) === 2);
   if (histSearch) filtered = filtered.filter(c=>
     String(c.phone||c.telephone||'').includes(histSearch) ||
     String(c.prenom||c.name||'').toLowerCase().includes(histSearch) ||
-    String(c.account||'').toString().includes(histSearch)
+    String(c.nom||'').toLowerCase().includes(histSearch) ||
+    String(c.botId||c.account||'').includes(histSearch)
   );
   const total = filtered.length;
   document.getElementById('hist-count-label').textContent = `${total} entrée${total>1?'s':''}`;
@@ -787,6 +805,7 @@ let queuePage = 1;
 const Q_PER_PAGE = 50;
 // CSV files queue
 let pendingCSVFiles = [];
+let pendingImportContext = null;
 // Notifications
 let notifEnabled = Notification.permission === 'granted';
 let notifBannerTimer = null;
@@ -1189,7 +1208,7 @@ async function loadQueue() {
     queueData = Array.isArray(r) ? r : (r.items||r.queue||[]);
     queuePage = 1;
     renderQueue();
-  } catch(e) { document.getElementById('queue-table').innerHTML='<tr><td colspan="6" style="color:var(--red);text-align:center;padding:20px">Erreur de chargement</td></tr>'; }
+  } catch(e) { document.getElementById('queue-table').innerHTML='<tr><td colspan="7" style="color:var(--red);text-align:center;padding:20px">Erreur de chargement</td></tr>'; }
 }
 
 function setStatusFilter(status, btn) {
@@ -1235,7 +1254,7 @@ function renderQueue() {
 
   const tbody = document.getElementById('queue-table');
   if (!page.length) {
-    tbody.innerHTML=`<tr><td colspan="6"><div class="empty-state"><div style="font-size:32px">🔍</div><p>Aucun contact pour ce filtre.</p></div></td></tr>`;
+    tbody.innerHTML=`<tr><td colspan="7"><div class="empty-state"><div style="font-size:32px">🔍</div><p>Aucun contact pour ce filtre.</p></div></td></tr>`;
   } else {
     tbody.innerHTML = page.map(c=>{
       const phone = c.phone||c.telephone||'';
@@ -1243,11 +1262,15 @@ function renderQueue() {
       const nom = c.nom||'';
       const shortMsg = (c.message||'').substring(0,40)+(c.message&&c.message.length>40?'…':'');
       const sentAt = c.sentAt ? new Date(c.sentAt).toLocaleString('fr-FR') : '—';
-      const st = c.replied ? 'replied' : (c.status||'pending');
+      const replyTitle = (c.replyText||'').replace(/"/g,'&quot;');
+      const repliedCell = c.replied
+        ? `<span class="badge badge-blue" title="${replyTitle}">💬 Oui</span>${c.replyText?`<span style="display:block;font-size:10px;color:var(--muted);margin-top:2px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${c.replyText.substring(0,28)}${c.replyText.length>28?'…':''}</span>`:''}`
+        : '<span style="color:var(--faint)">—</span>';
       return `<tr>
         <td style="font-family:monospace;font-size:12px">${phone}</td>
         <td>${prenom?`<strong>${prenom}</strong>${nom?' '+nom:''}`:'-'}</td>
-        <td>${statusBadge(st)}</td>
+        <td>${statusBadge(c.status||'pending')}</td>
+        <td style="max-width:140px">${repliedCell}</td>
         <td style="color:var(--muted);max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${(c.message||'').replace(/"/g,'&quot;')}">${shortMsg||'—'}</td>
         <td style="font-size:11px;color:var(--muted)">${sentAt}</td>
         <td><button class="btn btn-danger" style="padding:3px 8px;font-size:11px" onclick="removeQueueContact('${phone}')">🗑</button></td>
@@ -1289,7 +1312,10 @@ async function loadBlacklist() {
 function renderBlacklist() {
   const search = (document.getElementById('bl-search').value||'').toLowerCase();
   let filtered = blData;
-  if (search) filtered = filtered.filter(e => String(e.phone||e.number||e).includes(search));
+  if (search) filtered = filtered.filter(e => {
+    const p = String(typeof e === 'string' ? e : (e.phone || e.number || e));
+    return p.includes(search);
+  });
 
   const total = filtered.length;
   document.getElementById('bl-count').textContent = `${total} numéro${total>1?'s':''}`;
@@ -1303,8 +1329,8 @@ function renderBlacklist() {
     tbody.innerHTML = `<tr><td colspan="3"><div class="empty-state"><div style="font-size:32px">🚫</div><p>${search?'Aucun résultat pour cette recherche.':'La blacklist est vide.'}</p></div></td></tr>`;
   } else {
     tbody.innerHTML = page.map(e => {
-      const phone = e.phone||e.number||e;
-      const addedAt = e.addedAt ? new Date(e.addedAt).toLocaleString('fr-FR') : '—';
+      const phone = typeof e === 'string' ? e : (e.phone || e.number || e);
+      const addedAt = (typeof e === 'object' && e.addedAt) ? new Date(e.addedAt).toLocaleString('fr-FR') : '—';
       return `<tr>
         <td style="font-family:monospace;font-size:12px">${phone}</td>
         <td style="font-size:11px;color:var(--muted)">${addedAt}</td>
@@ -1346,7 +1372,10 @@ async function removeFromBlacklist(phone) {
   if (!confirm(`Retirer ${phone} de la blacklist ?`)) return;
   try {
     await fetch('/api/blacklist/remove',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phone})});
-    blData = blData.filter(e=>(e.phone||e.number||e)!==phone);
+    blData = blData.filter(e => {
+      const p = typeof e === 'string' ? e : (e.phone || e.number || e);
+      return p.replace(/\D/g,'') !== phone.replace(/\D/g,'');
+    });
     renderBlacklist();
   } catch(e) { alert('Erreur lors de la suppression'); }
 }
@@ -1425,33 +1454,140 @@ function renderCSVFileList() {
   btnImport.style.display='inline-flex'; btnClear.style.display='inline-flex';
 }
 
+async function postImportCSV(file, message, link, forceInclude = []) {
+  const fd = new FormData();
+  fd.append('file', file);
+  fd.append('message', message);
+  if (link) fd.append('link', link);
+  if (forceInclude.length) fd.append('forceInclude', JSON.stringify(forceInclude));
+  return fetch(`/api/${currentAccount}/import`, { method: 'POST', body: fd }).then(r => r.json());
+}
+
+function showImportResult(totalAdded, totalSkipped, errors, link, dupCount = 0) {
+  let html = `<span class="badge badge-green">✓ ${totalAdded} contacts ajoutés`;
+  if (totalSkipped) html += ` · ${totalSkipped} déjà en queue ignorés`;
+  if (dupCount) html += ` · ${dupCount} doublon${dupCount>1?'s':''} historique en attente`;
+  html += `${link ? ' 🔗 avec lien' : ''}</span>`;
+  if (errors.length) html += `<div style="margin-top:6px;font-size:11px;color:var(--red)">${errors.join('<br>')}</div>`;
+  document.getElementById('import-result').innerHTML = html;
+}
+
+function showDuplicatePanel(duplicates) {
+  const seen = new Set();
+  const unique = [];
+  for (const d of duplicates) {
+    const p = (d.phone || '').replace(/\D/g, '');
+    if (!p || seen.has(p)) continue;
+    seen.add(p);
+    unique.push({ ...d, phone: p });
+  }
+  pendingImportContext.duplicates = unique;
+  const tbody = document.getElementById('dup-table');
+  tbody.innerHTML = unique.map(d => {
+    const sent = d.sentAt ? new Date(d.sentAt).toLocaleString('fr-FR') : '—';
+    const bot = d.botId ? `N°${d.botId}` : '—';
+    return `<tr>
+      <td><input type="checkbox" class="dup-cb" value="${d.phone}" checked></td>
+      <td style="font-family:monospace;font-size:12px">${d.phone}</td>
+      <td>${d.prenom || '—'} ${d.nom || ''}</td>
+      <td style="font-size:11px;color:var(--muted)">${sent}</td>
+      <td>${bot}</td>
+    </tr>`;
+  }).join('');
+  document.getElementById('dup-select-all').checked = true;
+  document.getElementById('dup-confirm-box').style.display = 'block';
+  document.getElementById('dup-confirm-box').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function toggleDupSelectAll(checked) {
+  document.querySelectorAll('.dup-cb').forEach(cb => { cb.checked = checked; });
+}
+
+function dismissDuplicatePanel() {
+  document.getElementById('dup-confirm-box').style.display = 'none';
+  pendingImportContext = null;
+  clearCSVFiles();
+}
+
+function getSelectedDupPhones() {
+  return [...document.querySelectorAll('.dup-cb:checked')].map(cb => cb.value.replace(/\D/g, ''));
+}
+
+async function runForceIncludeImport(phones) {
+  const ctx = pendingImportContext;
+  if (!ctx || !phones.length) return 0;
+  let extra = 0;
+  for (const file of ctx.files) {
+    try {
+      const r = await postImportCSV(file, ctx.message, ctx.link, phones);
+      if (r.ok) extra += r.added || 0;
+    } catch (_) {}
+  }
+  return extra;
+}
+
+async function confirmDuplicatesSelected() {
+  const phones = getSelectedDupPhones();
+  if (!phones.length) { alert('Sélectionnez au moins un numéro.'); return; }
+  const btn = document.getElementById('btn-import-all');
+  btn.disabled = true;
+  const extra = await runForceIncludeImport(phones);
+  btn.disabled = false;
+  showImportResult(pendingImportContext.totalAdded + extra, pendingImportContext.totalSkipped, pendingImportContext.errors, pendingImportContext.link);
+  dismissDuplicatePanel();
+}
+
+async function confirmDuplicatesAll() {
+  const phones = pendingImportContext.duplicates.map(d => d.phone);
+  const btn = document.getElementById('btn-import-all');
+  btn.disabled = true;
+  const extra = await runForceIncludeImport(phones);
+  btn.disabled = false;
+  showImportResult(pendingImportContext.totalAdded + extra, pendingImportContext.totalSkipped, pendingImportContext.errors, pendingImportContext.link);
+  dismissDuplicatePanel();
+}
+
 async function importAllCSV() {
   const message = document.getElementById('import-message').value.trim();
   const link    = document.getElementById('import-link').value.trim();
   if (!message) { document.getElementById('import-result').innerHTML='<span class="badge badge-red">⚠️ Écrivez un message</span>'; return; }
   if (!pendingCSVFiles.length) return;
 
+  document.getElementById('dup-confirm-box').style.display = 'none';
   const btn = document.getElementById('btn-import-all');
   btn.disabled=true; btn.textContent='⏳ Import en cours...';
   let totalAdded=0, totalSkipped=0, errors=[];
+  const allDuplicates = [];
+
+  pendingImportContext = { message, link, files: [...pendingCSVFiles], duplicates: [], totalAdded: 0, totalSkipped: 0, errors: [] };
 
   for (const file of pendingCSVFiles) {
-    const fd=new FormData(); fd.append('file',file); fd.append('message',message); fd.append('merge','true');
-    if(link) fd.append('link',link);
     try {
-      const r=await fetch(`/api/${currentAccount}/import`,{method:'POST',body:fd}).then(r=>r.json());
-      if(r.ok){ totalAdded+=r.added||0; totalSkipped+=(r.skipped||0); }
-      else errors.push(file.name+': '+(r.error||'erreur'));
+      const r = await postImportCSV(file, message, link, []);
+      if (r.ok) {
+        totalAdded += r.added || 0;
+        totalSkipped += r.skippedQueue || r.skipped || 0;
+        if (r.needsConfirmation && r.duplicates && r.duplicates.length) {
+          allDuplicates.push(...r.duplicates);
+        }
+      } else errors.push(file.name+': '+(r.error||'erreur'));
     } catch(e){ errors.push(file.name+': erreur réseau'); }
   }
 
   btn.disabled=false; btn.textContent='📤 Importer tous les fichiers';
-  let html=`<span class="badge badge-green">✓ ${totalAdded} contacts ajoutés`;
-  if(totalSkipped) html+=` · ${totalSkipped} doublons ignorés`;
-  html+=`${link?' 🔗 avec lien':''}</span>`;
-  if(errors.length) html+=`<div style="margin-top:6px;font-size:11px;color:var(--red)">${errors.join('<br>')}</div>`;
-  document.getElementById('import-result').innerHTML=html;
+  pendingImportContext.totalAdded = totalAdded;
+  pendingImportContext.totalSkipped = totalSkipped;
+  pendingImportContext.errors = errors;
+
+  if (allDuplicates.length) {
+    showImportResult(totalAdded, totalSkipped, errors, link, allDuplicates.length);
+    showDuplicatePanel(allDuplicates);
+    return;
+  }
+
+  showImportResult(totalAdded, totalSkipped, errors, link);
   clearCSVFiles();
+  pendingImportContext = null;
 }
 
 function updatePreview() {

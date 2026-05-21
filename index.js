@@ -934,9 +934,10 @@ app.get('/api/sent-history', (req,res)=>{
   const list=Object.entries(hist).map(([phone,d])=>({phone,...d}));
   list.sort((a,b)=>new Date(b.sentAt)-new Date(a.sentAt));
   const{page=1,limit=100,q=''}=req.query;
+  const perPage = Math.min(Math.max(parseInt(limit) || 100, 1), 50000);
   const filtered=q?list.filter(x=>x.phone.includes(q)||(x.prenom||'').toLowerCase().includes(q.toLowerCase())||(x.nom||'').toLowerCase().includes(q.toLowerCase())):list;
-  const start=(parseInt(page)-1)*parseInt(limit);
-  res.json({total:filtered.length,items:filtered.slice(start,start+parseInt(limit))});
+  const start=(parseInt(page)-1)*perPage;
+  res.json({total:filtered.length,items:filtered.slice(start,start+perPage)});
 });
 app.delete('/api/sent-history/:phone',(req,res)=>{ removeFromSentHistory(req.params.phone); res.json({ok:true}); });
 app.delete('/api/sent-history',       (req,res)=>{ saveSentHistory({}); res.json({ok:true}); });
