@@ -66,19 +66,54 @@ function isBlacklisted(phone, cachedList) {
   return list.some(p => p.replace(/\D/g,'') === clean);
 }
 
-// ─── Historique global des contacts déjà envoyés ────────────────────────────
+// ─── FIX #3 : sent-history en cache mémoire + flush debounce ─────────────────
+// Avant : addToSentHistory() faisait loadSentHistory() + saveSentHistory() à
+// chaque envoi → 2 opérations disque synchrones par message (lecture + écriture
+// du fichier entier). Sur 300 msgs/jour = 600 I/O inutiles, ralentissement et
+// risque de corruption en cas d'accès concurrent.
+//
+// Correction : le fichier est chargé UNE SEULE FOIS en mémoire au démarrage
+// (_sentHistoryCache). Toutes les lectures/écritures opèrent sur ce cache.
+// La persistance sur disque est différée (debounce 3s) pour regrouper les
+// écritures consécutives en une seule opération I/O.
 const SENT_HISTORY_FILE = path.join(__dirname, 'data', 'sent-history.json');
-function loadSentHistory() {
+const SENT_HISTORY_FLUSH_MS = 3000;
+let _sentHistoryCache = null;
+let _sentHistoryFlushTimer = null;
+
+function _loadSentHistoryFromDisk() {
   if (!fs.existsSync(SENT_HISTORY_FILE)) return {};
   try { return JSON.parse(fs.readFileSync(SENT_HISTORY_FILE, 'utf-8')); } catch(e) { return {}; }
 }
+function _getSentHistoryCache() {
+  if (_sentHistoryCache === null) _sentHistoryCache = _loadSentHistoryFromDisk();
+  return _sentHistoryCache;
+}
+function _flushSentHistory() {
+  if (_sentHistoryFlushTimer) return;
+  _sentHistoryFlushTimer = setTimeout(() => {
+    _sentHistoryFlushTimer = null;
+    if (_sentHistoryCache === null) return;
+    const dir = path.dirname(SENT_HISTORY_FILE);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    try {
+      fs.writeFileSync(SENT_HISTORY_FILE, JSON.stringify(_sentHistoryCache, null, 2));
+    } catch(e) {
+      console.error('[SENT-HISTORY] Erreur écriture :', e.message);
+    }
+  }, SENT_HISTORY_FLUSH_MS);
+}
+
+// API publique (mêmes signatures qu'avant pour ne rien casser)
+function loadSentHistory() {
+  return _getSentHistoryCache();
+}
 function saveSentHistory(hist) {
-  const dir = path.dirname(SENT_HISTORY_FILE);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(SENT_HISTORY_FILE, JSON.stringify(hist, null, 2));
+  _sentHistoryCache = hist;
+  _flushSentHistory();
 }
 function addToSentHistory(phone, data) {
-  const hist = loadSentHistory();
+  const hist  = _getSentHistoryCache();
   const clean = phone.replace(/\D/g,'');
   if (!hist[clean]) {
     hist[clean] = {
@@ -88,19 +123,19 @@ function addToSentHistory(phone, data) {
       prenom:  data.prenom||'',
       nom:     data.nom||''
     };
-    saveSentHistory(hist);
+    _flushSentHistory(); // écriture différée, pas immédiate
   }
 }
 function isAlreadySent(phone, cachedHist) {
   const clean = phone.replace(/\D/g,'');
-  const hist = cachedHist || loadSentHistory();
+  const hist  = cachedHist || _getSentHistoryCache();
   return hist[clean] || null;
 }
 function removeFromSentHistory(phone) {
-  const hist = loadSentHistory();
+  const hist  = _getSentHistoryCache();
   const clean = phone.replace(/\D/g,'');
   delete hist[clean];
-  saveSentHistory(hist);
+  _flushSentHistory();
 }
 
 // ─── Planning (scheduled start) ─────────────────────────────────────────────
@@ -540,19 +575,9 @@ class BotAccount {
     this.log(`🧪 Message de test envoyé à +${number} [id: ${msgId}]`,'success');
   }
 
-  // ─── FIX #1 : race condition corrigée ────────────────────────────────────
-  // Avant : un flag `_starting` était posé puis immédiatement retiré de façon
-  // synchrone, ce qui le rendait totalement inutile. Deux appels simultanés à
-  // runQueue() (ex: événement 'ready' + setTimeout du schedule) pouvaient tous
-  // deux passer le guard `if (this.state.running)` avant qu'un des deux ait eu
-  // le temps de le poser, entraînant des doubles envois.
-  //
-  // Correction : `this.state.running` est posé à `true` comme PREMIÈRE
-  // instruction, avant tout await. Le flag `_starting` est supprimé. La
-  // propriété n'est plus jamais relue depuis l'extérieur avant d'être posée.
   async runQueue(relayBot) {
     if (this.state.running) return;
-    this.state.running = true; // ← verrou posé immédiatement, avant tout await
+    this.state.running = true;
 
     this.state.limitReached = false;
     const startStats={...this.state.stats}, startTime=Date.now();
