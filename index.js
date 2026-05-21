@@ -283,6 +283,11 @@ function saveConfig() {
 const rand  = (a, b) => a + Math.random() * (b - a);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+function isPuppeteerNavigationError(msg) {
+  return /execution context was destroyed|most likely because of a navigation|target closed|session closed|Protocol error/i.test(msg || '');
+}
+
+
 function whatsappMsgId(msg) {
   if (!msg || !msg.id) return null;
   return msg.id._serialized || msg.id.id || (typeof msg.id === 'string' ? msg.id : null);
@@ -505,6 +510,7 @@ class BotAccount {
     this._saveQueueTimer = null;
     this._queueLoopActive = false;
     this._resettingAuth  = false;
+    this._initializing   = false;
     this.state = {
       qr: null, ready: false, running: false, paused: false, sessionHealthy: null,
       queue: [], sessionCount: 0,
@@ -523,7 +529,8 @@ class BotAccount {
       rmrf(this.authPath);
       console.log(`[BOT${id}] 🗑️ RESET_AUTH au démarrage — session supprimée : ${this.authPath}`);
     }
-    this._initClient();
+    const stagger = id === 2 ? parseInt(process.env.BOT2_START_DELAY_MS || '10000', 10) : 0;
+    setTimeout(() => this._initClient().catch(() => {}), stagger);
   }
 
   get dailyLimit() { return dailyLimitMap[this.id]; }
@@ -728,16 +735,17 @@ class BotAccount {
   }
 
   _makeClient() {
+    const takeover = process.env.TAKEOVER_ON_CONFLICT === '1';
+    const cacheType = (process.env.WA_WEB_CACHE_TYPE || 'local').toLowerCase();
+    const webVersionCache = cacheType === 'remote'
+      ? { type: 'remote', remotePath: WA_WEB_CACHE_REMOTE, strict: false }
+      : { type: 'local' };
     return new Client({
-      authStrategy: new LocalAuth({ dataPath: this.authPath, clientId: `bot${this.id}` }),
+      authStrategy: new LocalAuth({ dataPath: this.authPath }),
       webVersion: WA_WEB_VERSION,
-      webVersionCache: {
-        type: 'remote',
-        remotePath: WA_WEB_CACHE_REMOTE,
-        strict: false,
-      },
-      takeoverOnConflict: true,
-      takeoverTimeoutMs: 10000,
+      webVersionCache,
+      takeoverOnConflict: takeover,
+      takeoverTimeoutMs: takeover ? 10000 : 0,
       puppeteer: {
         headless: true,
         executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium',
@@ -787,25 +795,43 @@ class BotAccount {
     c.on('auth_failure', msg => this.log(`Erreur auth : ${msg}`, 'error'));
   }
 
+  async _destroyClient() {
+    if (!this.client) return;
+    const c = this.client;
+    this.client = null;
+    try { await withTimeout(c.destroy(), 12000, 'client.destroy()'); }
+    catch (e) { console.warn(`[BOT${this.id}] destroy: ${e.message}`); }
+    await sleep(2500);
+  }
+
   _scheduleRetry(delay) {
     const MAX = 10;
     if (this.retryCount >= MAX) { this.log('❌ Trop de tentatives, arrêt.', 'error'); return; }
     this.retryCount++;
     const wait = delay || Math.min(10000 * this.retryCount, 60000);
     this.log(`🔄 Tentative ${this.retryCount}/${MAX} dans ${wait/1000}s`, 'warn');
-    setTimeout(() => {
+    setTimeout(() => { this._initClient().catch(() => {}); }, wait);
+  }
+
+  async _initClient() {
+    if (this._initializing || this._resettingAuth) return;
+    this._initializing = true;
+    try {
+      await this._destroyClient();
       removeLocks(this.authPath);
       this.client = this._makeClient();
       this._bindEvents(this.client);
-      this.client.initialize().catch(err => { this.log(`Retry ${this.retryCount} échoué : ${err.message}`, 'error'); this._scheduleRetry(); });
-    }, wait);
-  }
-
-  _initClient() {
-    removeLocks(this.authPath);
-    this.client = this._makeClient();
-    this._bindEvents(this.client);
-    this.client.initialize().catch(err => { this.log(`Erreur initialisation : ${err.message}`, 'error'); this._scheduleRetry(15000); });
+      await withTimeout(this.client.initialize(), 180000, 'WhatsApp.initialize()');
+      this.retryCount = 0;
+    } catch (err) {
+      const msg = err.message || String(err);
+      const nav = isPuppeteerNavigationError(msg);
+      this.log(`Erreur initialisation : ${msg}${nav ? ' (rechargement WA Web — nouvelle tentative)' : ''}`, 'error');
+      await this._destroyClient();
+      this._scheduleRetry(nav ? 30000 : 15000);
+    } finally {
+      this._initializing = false;
+    }
   }
 
   // ─── FIX PRINCIPAL : resetAuth supprime la session et force un nouveau QR ────
@@ -834,7 +860,7 @@ class BotAccount {
     this._resetStuckContacts();
     await sleep(3000);
     this._resettingAuth = false;
-    this._initClient();
+    await this._initClient();
     this.log('🔄 Session réinitialisée — scannez le nouveau QR (déconnectez autres sessions Web sur le téléphone)', 'warn');
   }
 
