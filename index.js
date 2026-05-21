@@ -67,15 +67,6 @@ function isBlacklisted(phone, cachedList) {
 }
 
 // ─── FIX #3 : sent-history en cache mémoire + flush debounce ─────────────────
-// Avant : addToSentHistory() faisait loadSentHistory() + saveSentHistory() à
-// chaque envoi → 2 opérations disque synchrones par message (lecture + écriture
-// du fichier entier). Sur 300 msgs/jour = 600 I/O inutiles, ralentissement et
-// risque de corruption en cas d'accès concurrent.
-//
-// Correction : le fichier est chargé UNE SEULE FOIS en mémoire au démarrage
-// (_sentHistoryCache). Toutes les lectures/écritures opèrent sur ce cache.
-// La persistance sur disque est différée (debounce 3s) pour regrouper les
-// écritures consécutives en une seule opération I/O.
 const SENT_HISTORY_FILE = path.join(__dirname, 'data', 'sent-history.json');
 const SENT_HISTORY_FLUSH_MS = 3000;
 let _sentHistoryCache = null;
@@ -104,37 +95,23 @@ function _flushSentHistory() {
   }, SENT_HISTORY_FLUSH_MS);
 }
 
-// API publique (mêmes signatures qu'avant pour ne rien casser)
-function loadSentHistory() {
-  return _getSentHistoryCache();
-}
-function saveSentHistory(hist) {
-  _sentHistoryCache = hist;
-  _flushSentHistory();
-}
+function loadSentHistory() { return _getSentHistoryCache(); }
+function saveSentHistory(hist) { _sentHistoryCache = hist; _flushSentHistory(); }
 function addToSentHistory(phone, data) {
   const hist  = _getSentHistoryCache();
   const clean = phone.replace(/\D/g,'');
   if (!hist[clean]) {
-    hist[clean] = {
-      sentAt:  data.sentAt || new Date().toISOString(),
-      botId:   data.botId,
-      message: (data.message||'').substring(0,200),
-      prenom:  data.prenom||'',
-      nom:     data.nom||''
-    };
-    _flushSentHistory(); // écriture différée, pas immédiate
+    hist[clean] = { sentAt: data.sentAt || new Date().toISOString(), botId: data.botId, message: (data.message||'').substring(0,200), prenom: data.prenom||'', nom: data.nom||'' };
+    _flushSentHistory();
   }
 }
 function isAlreadySent(phone, cachedHist) {
   const clean = phone.replace(/\D/g,'');
-  const hist  = cachedHist || _getSentHistoryCache();
-  return hist[clean] || null;
+  return (cachedHist || _getSentHistoryCache())[clean] || null;
 }
 function removeFromSentHistory(phone) {
-  const hist  = _getSentHistoryCache();
-  const clean = phone.replace(/\D/g,'');
-  delete hist[clean];
+  const hist = _getSentHistoryCache();
+  delete hist[phone.replace(/\D/g,'')];
   _flushSentHistory();
 }
 
@@ -145,17 +122,11 @@ function cancelSchedule(accountId) {
 }
 
 function parseScheduledAt(scheduledAt) {
-  if (!scheduledAt || typeof scheduledAt !== 'string') {
-    return { ok: false, error: 'scheduledAt doit être une chaîne de caractères' };
-  }
+  if (!scheduledAt || typeof scheduledAt !== 'string') return { ok: false, error: 'scheduledAt doit être une chaîne de caractères' };
   const ts = Date.parse(scheduledAt);
-  if (isNaN(ts)) {
-    return { ok: false, error: `Date invalide : "${scheduledAt}". Format attendu : ISO 8601 (ex: 2026-05-22T14:00:00.000Z)` };
-  }
+  if (isNaN(ts)) return { ok: false, error: `Date invalide : "${scheduledAt}". Format attendu : ISO 8601 (ex: 2026-05-22T14:00:00.000Z)` };
   const ms = ts - Date.now();
-  if (ms < 30_000) {
-    return { ok: false, error: `La date planifiée doit être dans au moins 30 secondes (reçu : ${new Date(ts).toISOString()})` };
-  }
+  if (ms < 30_000) return { ok: false, error: `La date planifiée doit être dans au moins 30 secondes (reçu : ${new Date(ts).toISOString()})` };
   return { ok: true, ts, ms };
 }
 
@@ -197,9 +168,7 @@ function recordSessionEnd(botId, stats) {
 const MAX_LOG_ENTRIES = 1000;
 const LOG_FLUSH_DEBOUNCE_MS = 2000;
 
-function logFilePath(id) {
-  return path.join(__dirname, 'data', `logs_${id}.json`);
-}
+function logFilePath(id) { return path.join(__dirname, 'data', `logs_${id}.json`); }
 function loadLogs(id) {
   const file = logFilePath(id);
   if (!fs.existsSync(file)) return [];
@@ -209,21 +178,15 @@ function saveLogs(id, entries) {
   const file = logFilePath(id);
   const dir  = path.dirname(file);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  try {
-    fs.writeFileSync(file, JSON.stringify(entries.slice(0, MAX_LOG_ENTRIES), null, 2));
-  } catch(e) {
-    console.error(`[BOT${id}] Erreur écriture logs : ${e.message}`);
-  }
+  try { fs.writeFileSync(file, JSON.stringify(entries.slice(0, MAX_LOG_ENTRIES), null, 2)); }
+  catch(e) { console.error(`[BOT${id}] Erreur écriture logs : ${e.message}`); }
 }
 
 // ─── FIX #10 : dailyLimit dynamique via Proxy ────────────────────────────────
 const DEFAULT_DAILY_LIMIT = parseInt(process.env.DAILY_LIMIT || '300');
 const _dailyLimitOverrides = {};
 const dailyLimitMap = new Proxy(_dailyLimitOverrides, {
-  get(target, id) {
-    const numId = typeof id === 'symbol' ? id : Number(id);
-    return target[numId] !== undefined ? target[numId] : DEFAULT_DAILY_LIMIT;
-  },
+  get(target, id) { const n = typeof id === 'symbol' ? id : Number(id); return target[n] !== undefined ? target[n] : DEFAULT_DAILY_LIMIT; },
   set(target, id, value) { target[Number(id)] = value; return true; }
 });
 
@@ -246,9 +209,7 @@ if (fs.existsSync(CONFIG_FILE)) {
     const saved = JSON.parse(fs.readFileSync(CONFIG_FILE,'utf-8'));
     Object.assign(config, saved);
     if (saved.dailyLimit && typeof saved.dailyLimit === 'object') {
-      for (const [id, val] of Object.entries(saved.dailyLimit)) {
-        dailyLimitMap[id] = parseInt(val);
-      }
+      for (const [id, val] of Object.entries(saved.dailyLimit)) dailyLimitMap[id] = parseInt(val);
     }
   } catch(e) {}
 }
@@ -269,17 +230,16 @@ function splitMessageAndLink(msg) {
   const url    = match[1];
   const before = msg.slice(0, match.index).trim();
   const after  = msg.slice(match.index + url.length).trim();
-  const text   = [before, after].filter(Boolean).join('\n').trim();
-  return { text, url };
+  return { text: [before, after].filter(Boolean).join('\n').trim(), url };
 }
 
 function personalizeMessage(template, contact) {
   if (!template) return template;
   return template
-    .replace(/\{pr[eé]nom\}/gi,  contact.prenom || contact.nom || '')
-    .replace(/\{nom\}/gi,        contact.nom    || contact.prenom || '')
-    .replace(/\{name\}/gi,       contact.prenom || contact.nom || '')
-    .replace(/\{phone\}/gi,      contact.phone  || '')
+    .replace(/\{pr[eé]nom\}/gi, contact.prenom || contact.nom || '')
+    .replace(/\{nom\}/gi,       contact.nom    || contact.prenom || '')
+    .replace(/\{name\}/gi,      contact.prenom || contact.nom || '')
+    .replace(/\{phone\}/gi,     contact.phone  || '')
     .trim();
 }
 
@@ -293,6 +253,80 @@ function removeLocks(dir) {
     }
   } catch(e) {}
 }
+
+// ─── FIX export-groupe : getContactById avec timeout individuel ───────────────
+//
+// Problème : La boucle for..of appelait getContactById() sans aucun délai entre
+// chaque participant. Sur un groupe de 100+ membres, WA Web envoie à Puppeteer
+// une rafale de requêtes synchrones qui déclenche un rate-limit côté WA (
+// "Error: Evaluation failed: Error: rate-overlimit" ou ECONNRESET). De plus,
+// getContactById() n'a pas de timeout natif : si Puppeteer ne répond pas (session
+// WA expirée, page gelée), la Promise pend indéfiniment et bloque la route HTTP
+// jusqu'à ce qu'Express ferme la connexion.
+//
+// Corrections apportées :
+//   1. withTimeout() : wrapper qui rejette la Promise après `ms` millisecondes.
+//      Utilisé autour de chaque getContactById() (5s max par contact).
+//   2. Délai inter-requetes : 120ms entre chaque appel pour rester sous le
+//      rate-limit WA Web (throttle recommandé : < 10 req/s).
+//   3. Backoff exponentiel : si getContactById() échoue (timeout ou erreur réseau),
+//      on attend 800ms avant de réessayer une fois, puis on passe au suivant.
+//   4. Progression log : un log tous les 25 contacts pour ne pas saturer la
+//      console sur les grands groupes.
+//   5. Le nom reste vide en cas d'échec (comportement identique à avant) —
+//      aucune donnée ne se perd.
+
+/** Wrapper : rejette la Promise après `ms` ms si elle n'est pas résolue. */
+function withTimeout(promise, ms, label) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`Timeout (${ms}ms) : ${label}`)), ms);
+    promise.then(
+      val  => { clearTimeout(timer); resolve(val); },
+      err  => { clearTimeout(timer); reject(err); }
+    );
+  });
+}
+
+/**
+ * Récupère le nom affiché d'un participant WA avec timeout + retry.
+ * @param {Client} client   - Instance whatsapp-web.js
+ * @param {string} userId   - ID de l'utilisateur (ex: "33612345678")
+ * @param {number} timeoutMs - Délai max par tentative (défaut 5000ms)
+ * @returns {{ prenom: string, nom: string }}
+ */
+async function getContactName(client, userId, timeoutMs = 5000) {
+  const chatId = `${userId}@c.us`;
+  try {
+    const contact = await withTimeout(
+      client.getContactById(chatId),
+      timeoutMs,
+      `getContactById(${userId})`
+    );
+    const displayName = (contact.pushname || contact.name || '').trim();
+    const parts = displayName.split(/\s+/);
+    return { prenom: parts[0] || '', nom: parts.slice(1).join(' ') || '' };
+  } catch (firstErr) {
+    // Un seul retry après backoff de 800ms
+    await sleep(800);
+    try {
+      const contact = await withTimeout(
+        client.getContactById(chatId),
+        timeoutMs,
+        `getContactById(${userId}) retry`
+      );
+      const displayName = (contact.pushname || contact.name || '').trim();
+      const parts = displayName.split(/\s+/);
+      return { prenom: parts[0] || '', nom: parts.slice(1).join(' ') || '' };
+    } catch (retryErr) {
+      // Erreur silencieuse : on laisse prenom/nom vides plutôt que de planter
+      console.warn(`[export-group] ⚠️  ${userId} : ${retryErr.message}`);
+      return { prenom: '', nom: '' };
+    }
+  }
+}
+
+// Délai en ms entre deux appels getContactById pour éviter le rate-limit WA.
+const EXPORT_GROUP_INTER_DELAY_MS = 120;
 
 // ─── BotAccount ──────────────────────────────────────────────────────────────
 class BotAccount {
@@ -374,9 +408,7 @@ class BotAccount {
   log(msg, type = 'info') {
     const entry = { time: new Date().toISOString(), msg, type };
     this.state.log.unshift(entry);
-    if (this.state.log.length > MAX_LOG_ENTRIES) {
-      this.state.log = this.state.log.slice(0, MAX_LOG_ENTRIES);
-    }
+    if (this.state.log.length > MAX_LOG_ENTRIES) this.state.log = this.state.log.slice(0, MAX_LOG_ENTRIES);
     console.log(`[BOT${this.id}][${type.toUpperCase()}] ${msg}`);
     this._flushLogs();
   }
@@ -404,8 +436,7 @@ class BotAccount {
 
   _windowResetIn() {
     if (!this.state.windowStart) return 0;
-    const elapsed = Date.now() - new Date(this.state.windowStart).getTime();
-    return Math.max(0, 24 * 3600 * 1000 - elapsed);
+    return Math.max(0, 24 * 3600 * 1000 - (Date.now() - new Date(this.state.windowStart).getTime()));
   }
 
   _scheduleAutoResume(relayBot) {
@@ -424,18 +455,12 @@ class BotAccount {
     }, ms);
   }
 
-  _recordFirstSend() {
-    if (!this.state.windowStart) this.state.windowStart = new Date().toISOString();
-  }
+  _recordFirstSend() { if (!this.state.windowStart) this.state.windowStart = new Date().toISOString(); }
 
-  _dailyLimitReached() {
-    this._checkWindowReset();
-    return this.state.dailySent >= this.dailyLimit;
-  }
+  _dailyLimitReached() { this._checkWindowReset(); return this.state.dailySent >= this.dailyLimit; }
 
   _detectBan(errMessage) {
-    const banPatterns = [/rate.?limit/i, /too many/i, /spam/i, /blocked/i, /account.*banned/i, /restrict/i, /ECONNRESET/i, /WAWebDisconnected/i];
-    return banPatterns.some(p => p.test(errMessage));
+    return [/rate.?limit/i,/too many/i,/spam/i,/blocked/i,/account.*banned/i,/restrict/i,/ECONNRESET/i,/WAWebDisconnected/i].some(p=>p.test(errMessage));
   }
 
   _handleBan(err) {
@@ -516,69 +541,52 @@ class BotAccount {
     this.client.initialize().catch(err => { this.log(`Erreur initialisation : ${err.message}`, 'error'); this._scheduleRetry(15000); });
   }
 
-  async _delayMsg() { const ms=rand(config.minDelay,config.maxDelay)*1000; this.log(`⏳ Pause : ${(ms/1000).toFixed(0)}s`,'info'); await sleep(ms); }
+  async _delayMsg()     { const ms=rand(config.minDelay,config.maxDelay)*1000;           this.log(`⏳ Pause : ${(ms/1000).toFixed(0)}s`,'info');          await sleep(ms); }
   async _delaySession() { const ms=rand(config.sessionPauseMin,config.sessionPauseMax)*1000; this.log(`☕ Pause session : ${(ms/60000).toFixed(0)}min`,'warn'); await sleep(ms); }
-  async _typing(chat) { try { await chat.sendStateTyping(); await sleep(rand(config.typingMin,config.typingMax)); await chat.clearState(); } catch(e) {} }
+  async _typing(chat)   { try { await chat.sendStateTyping(); await sleep(rand(config.typingMin,config.typingMax)); await chat.clearState(); } catch(e) {} }
 
   async _sendMessage(chatId, rawMsg, link) {
     const chat = await this.client.getChatById(chatId);
-
     const assertSent = (msg, label) => {
-      if (!msg || !msg.id || !msg.id._serialized) {
+      if (!msg || !msg.id || !msg.id._serialized)
         throw new Error(`sendMessage() n'a pas retourné d'accusé de réception WhatsApp (${label}). Session peut-être expirée.`);
-      }
       return msg.id._serialized;
     };
-
     if (link && link.trim()) {
       await this._typing(chat);
-      const sentText = await this.client.sendMessage(chatId, rawMsg.trim());
-      assertSent(sentText, 'texte');
+      assertSent(await this.client.sendMessage(chatId, rawMsg.trim()), 'texte');
       const delay = rand(config.linkDelayMin, config.linkDelayMax);
       this.log(`⏱ Délai avant lien : ${(delay/1000).toFixed(1)}s`, 'info');
       await sleep(delay);
-      const sentLink = await this.client.sendMessage(chatId, link.trim());
-      return assertSent(sentLink, 'lien');
+      return assertSent(await this.client.sendMessage(chatId, link.trim()), 'lien');
     }
-
     const parts = splitMessageAndLink(rawMsg);
     if (parts) {
       if (parts.text) {
         await this._typing(chat);
-        const sentText = await this.client.sendMessage(chatId, parts.text);
-        assertSent(sentText, 'texte');
-        const delay = rand(config.linkDelayMin, config.linkDelayMax);
-        await sleep(delay);
-        const sentLink = await this.client.sendMessage(chatId, parts.url);
-        return assertSent(sentLink, 'lien');
-      } else {
-        await this._typing(chat);
-        const sentLink = await this.client.sendMessage(chatId, parts.url);
-        return assertSent(sentLink, 'url-seule');
+        assertSent(await this.client.sendMessage(chatId, parts.text), 'texte');
+        await sleep(rand(config.linkDelayMin, config.linkDelayMax));
+        return assertSent(await this.client.sendMessage(chatId, parts.url), 'lien');
       }
+      await this._typing(chat);
+      return assertSent(await this.client.sendMessage(chatId, parts.url), 'url-seule');
     }
-
     await this._typing(chat);
-    const sent = await this.client.sendMessage(chatId, rawMsg);
-    return assertSent(sent, 'texte-simple');
+    return assertSent(await this.client.sendMessage(chatId, rawMsg), 'texte-simple');
   }
 
   async sendTest(phone, message, link) {
     if (!this.state.ready) throw new Error('WhatsApp non connecté');
     const number=phone.replace(/\D/g,''), chatId=`${number}@c.us`;
-    const exists=await this.client.isRegisteredUser(chatId);
-    if (!exists) throw new Error(`+${number} n'est pas sur WhatsApp`);
+    if (!await this.client.isRegisteredUser(chatId)) throw new Error(`+${number} n'est pas sur WhatsApp`);
     const fakeContact={phone:number,prenom:'Test',nom:'Test'};
-    const rawMsg=personalizeMessage(message||'Message de test 👋',fakeContact);
-    const rawLink=personalizeMessage(link||'',fakeContact);
-    const msgId = await this._sendMessage(chatId,rawMsg,rawLink);
+    const msgId = await this._sendMessage(chatId, personalizeMessage(message||'Message de test 👋',fakeContact), personalizeMessage(link||'',fakeContact));
     this.log(`🧪 Message de test envoyé à +${number} [id: ${msgId}]`,'success');
   }
 
   async runQueue(relayBot) {
     if (this.state.running) return;
     this.state.running = true;
-
     this.state.limitReached = false;
     const startStats={...this.state.stats}, startTime=Date.now();
     this.log(`🚀 Bot démarré (session ≤${config.sessionSize} msgs, limite/jour : ${this.dailyLimit})`,'success');
@@ -620,34 +628,25 @@ class BotAccount {
 
       try {
         const number=contact.phone.replace(/\D/g,''), chatId=`${number}@c.us`;
-
         if (isBlacklisted(number)) {
           contact.status='blacklisted'; this.state.stats.blacklisted++;
           this.log(`🚫 Blacklisté : +${number}`,'warn');
           this._saveQueue(); await sleep(rand(1000,3000)); continue;
         }
-
-        const exists=await this.client.isRegisteredUser(chatId);
-        if (!exists) {
+        if (!await this.client.isRegisteredUser(chatId)) {
           contact.status='skipped'; this.state.stats.skipped++;
           this.log(`⏭️ Non inscrit : +${number}`,'warn');
           this._saveQueue(); await sleep(rand(3000,8000)); continue;
         }
         await sleep(rand(500,2000));
-
         const rawMsg=personalizeMessage((contact.message||'').trim()||process.env.DEFAULT_MESSAGE||'Bonjour ! 👋',contact);
-        const link=(contact.link||'').trim();
-        const personalizedLink=personalizeMessage(link,contact);
-
+        const personalizedLink=personalizeMessage((contact.link||'').trim(),contact);
         this._recordFirstSend();
         const msgId = await this._sendMessage(chatId,rawMsg,personalizedLink);
-        contact.status='done'; contact.sentAt=new Date().toISOString();
-        contact.waMessageId = msgId;
+        contact.status='done'; contact.sentAt=new Date().toISOString(); contact.waMessageId=msgId;
         this.state.stats.sent++; this.state.sessionCount++; this.state.dailySent++;
-        this.log(`✅ Envoyé à +${number}${contact.prenom?' ('+contact.prenom+')':''}${link?' 🔗':''} [${this.state.dailySent}/${this.dailyLimit}] id:${msgId}`,'success');
-
+        this.log(`✅ Envoyé à +${number}${contact.prenom?' ('+contact.prenom+')':''}${contact.link?' 🔗':''} [${this.state.dailySent}/${this.dailyLimit}] id:${msgId}`,'success');
         addToSentHistory(number, { sentAt: contact.sentAt, botId: this.id, message: rawMsg, prenom: contact.prenom, nom: contact.nom });
-
         this._saveQueue();
         await this._delayMsg();
       } catch(err) {
@@ -659,23 +658,19 @@ class BotAccount {
     }
 
     this.state.running=false;
-    const stillPending=this.state.queue.some(c=>c.status==='pending');
-    if (!stillPending&&!this.state.bannedAt) this.log('🏁 Queue terminée','success');
-
+    if (!this.state.queue.some(c=>c.status==='pending')&&!this.state.bannedAt) this.log('🏁 Queue terminée','success');
     const sentThisRun=this.state.stats.sent-(startStats.sent||0);
     const skipThisRun=this.state.stats.skipped-(startStats.skipped||0);
     const failThisRun=this.state.stats.failed-(startStats.failed||0);
-    if (sentThisRun+skipThisRun+failThisRun>0) {
+    if (sentThisRun+skipThisRun+failThisRun>0)
       recordSessionEnd(this.id,{sent:sentThisRun,skipped:skipThisRun,failed:failThisRun,duration:Math.round((Date.now()-startTime)/1000)});
-    }
     this._saveQueue();
   }
 
   importCSV(content, defaultMessage, defaultLink, forceIncludeDuplicates = []) {
     const records = csv.parse(content, { columns: true, skip_empty_lines: true });
-    const blacklistCache    = loadBlacklist();
-    const sentHistoryCache  = loadSentHistory();
-
+    const blacklistCache   = loadBlacklist();
+    const sentHistoryCache = loadSentHistory();
     let added=0, blacklisted=0, skippedQueue=0;
     const duplicates=[];
     for (const row of records) {
@@ -683,23 +678,14 @@ class BotAccount {
       if (!phone||phone.length<8) continue;
       const prenom=row.prenom||row.prénom||row.firstname||row.first_name||row.Prenom||row['Prénom']||'';
       const nom=row.nom||row.name||row.lastname||row.last_name||row.Nom||row['Nom']||'';
-
       if (isBlacklisted(phone, blacklistCache)) { blacklisted++; continue; }
       if (this.state.queue.find(c=>c.phone.replace(/\D/g,'')=== phone)) { skippedQueue++; continue; }
-
       const histEntry=isAlreadySent(phone, sentHistoryCache);
       if (histEntry && !forceIncludeDuplicates.includes(phone)) {
         duplicates.push({ phone, prenom: prenom.trim(), nom: nom.trim(), sentAt: histEntry.sentAt, botId: histEntry.botId, message: histEntry.message });
         continue;
       }
-
-      this.state.queue.push({
-        phone, status:'pending',
-        prenom:prenom.trim(), nom:nom.trim(),
-        message:row.message||defaultMessage,
-        link:row.link||defaultLink||'',
-        addedAt:new Date().toISOString()
-      });
+      this.state.queue.push({ phone, status:'pending', prenom:prenom.trim(), nom:nom.trim(), message:row.message||defaultMessage, link:row.link||defaultLink||'', addedAt:new Date().toISOString() });
       added++;
     }
     this._saveQueue();
@@ -775,10 +761,7 @@ function getBot(req) {
 }
 function requireBot(req, res) {
   const bot = getBot(req);
-  if (!bot) {
-    res.status(404).json({ ok: false, error: `Compte invalide. Comptes disponibles : ${Object.keys(bots).join(', ')}` });
-    return null;
-  }
+  if (!bot) { res.status(404).json({ ok: false, error: `Compte invalide. Comptes disponibles : ${Object.keys(bots).join(', ')}` }); return null; }
   return bot;
 }
 function otherBot(bot){return bot.id===1?bots[2]:bots[1];}
@@ -799,8 +782,7 @@ app.post('/api/:account/set-limit', (req,res)=>{
   const b=requireBot(req,res); if(!b) return;
   const limit=parseInt(req.body.limit);
   if(!limit||limit<1||limit>1000) return res.status(400).json({ok:false,error:'Limite invalide (1-1000)'});
-  dailyLimitMap[b.id]=limit;
-  saveConfig();
+  dailyLimitMap[b.id]=limit; saveConfig();
   b.log(`⚙️ Limite modifiée → ${limit} msgs/24h`,'warn');
   res.json({ok:true,limit});
 });
@@ -835,13 +817,8 @@ app.get('/api/:account/logs', (req,res)=>{
   res.json({ total, page: parseInt(page), perPage, items: entries.slice(start, start+perPage) });
 });
 
-app.delete('/api/:account/logs', (req,res)=>{
-  const b=requireBot(req,res); if(!b) return;
-  b.clearLogs();
-  res.json({ok:true});
-});
+app.delete('/api/:account/logs', (req,res)=>{ const b=requireBot(req,res); if(!b) return; b.clearLogs(); res.json({ok:true}); });
 
-// ─── /api/stats — avec détail par compte et totalReplies ─────────────────────
 app.get('/api/stats', (req,res)=>{
   const sessions=loadSessions();
   const totalSent=sessions.reduce((s,x)=>s+(x.sent||0),0);
@@ -851,31 +828,18 @@ app.get('/api/stats', (req,res)=>{
   const deliveryRate=total>0?Math.round(totalSent/total*100):0;
   const skipRate=total>0?Math.round(totalSkipped/total*100):0;
   const last30=sessions.slice(-30).map(s=>({date:s.date,botId:s.botId,sent:s.sent||0,skipped:s.skipped||0,failed:s.failed||0,duration:s.duration||0}));
-
-  const totalReplies = Object.values(bots).reduce((sum, b) => sum + (b.state.repliesReceived || 0), 0);
-
-  const byAccount = {};
-  for (const s of sessions) {
-    const id = s.botId || 1;
-    if (!byAccount[id]) byAccount[id] = { account: id, sent: 0, failed: 0, skipped: 0, replies: 0 };
-    byAccount[id].sent    += s.sent    || 0;
-    byAccount[id].failed  += s.failed  || 0;
-    byAccount[id].skipped += s.skipped || 0;
+  const totalReplies=Object.values(bots).reduce((sum,b)=>sum+(b.state.repliesReceived||0),0);
+  const byAccount={};
+  for(const s of sessions){
+    const id=s.botId||1;
+    if(!byAccount[id]) byAccount[id]={account:id,sent:0,failed:0,skipped:0,replies:0};
+    byAccount[id].sent+=s.sent||0; byAccount[id].failed+=s.failed||0; byAccount[id].skipped+=s.skipped||0;
   }
-  for (const b of Object.values(bots)) {
-    if (!byAccount[b.id]) byAccount[b.id] = { account: b.id, sent: 0, failed: 0, skipped: 0, replies: 0 };
-    byAccount[b.id].replies = b.state.repliesReceived || 0;
+  for(const b of Object.values(bots)){
+    if(!byAccount[b.id]) byAccount[b.id]={account:b.id,sent:0,failed:0,skipped:0,replies:0};
+    byAccount[b.id].replies=b.state.repliesReceived||0;
   }
-  const accounts = Object.values(byAccount).sort((a,b)=>a.account-b.account);
-
-  res.json({
-    totalSent, totalSkipped, totalFailed, total,
-    deliveryRate, skipRate,
-    totalReplies,
-    totalSessions: sessions.length,
-    sessions: last30,
-    accounts
-  });
+  res.json({ totalSent,totalSkipped,totalFailed,total,deliveryRate,skipRate,totalReplies,totalSessions:sessions.length,sessions:last30,accounts:Object.values(byAccount).sort((a,b)=>a.account-b.account) });
 });
 
 app.get('/api/:account/queue', (req,res)=>{
@@ -917,17 +881,15 @@ app.post('/api/:account/import', upload.single('file'), (req,res)=>{
   } finally {
     try { fs.unlinkSync(req.file.path); } catch(_) {}
   }
-  if(result.duplicates.length>0&&!(JSON.parse(req.body.forceInclude||'[]').length>0)) {
+  if(result.duplicates.length>0&&!(JSON.parse(req.body.forceInclude||'[]').length>0))
     res.json({ok:true,...result,needsConfirmation:true});
-  } else {
+  else
     res.json({ok:true,...result,needsConfirmation:false});
-  }
 });
 
 app.delete('/api/:account/queue/:phone', (req,res)=>{
   const bot=requireBot(req,res); if(!bot) return;
-  const removed=bot.removeContact(req.params.phone);
-  res.json({ok:true,removed});
+  res.json({ok:true,removed:bot.removeContact(req.params.phone)});
 });
 
 app.get('/api/sent-history', (req,res)=>{
@@ -939,16 +901,10 @@ app.get('/api/sent-history', (req,res)=>{
   const start=(parseInt(page)-1)*parseInt(limit);
   res.json({total:filtered.length,items:filtered.slice(start,start+parseInt(limit))});
 });
-app.delete('/api/sent-history/:phone', (req,res)=>{
-  removeFromSentHistory(req.params.phone);
-  res.json({ok:true});
-});
-app.delete('/api/sent-history', (req,res)=>{
-  saveSentHistory({});
-  res.json({ok:true});
-});
+app.delete('/api/sent-history/:phone',(req,res)=>{ removeFromSentHistory(req.params.phone); res.json({ok:true}); });
+app.delete('/api/sent-history',       (req,res)=>{ saveSentHistory({}); res.json({ok:true}); });
 
-app.get('/api/blacklist', (req,res)=>res.json({list:loadBlacklist()}));
+app.get('/api/blacklist',(req,res)=>res.json({list:loadBlacklist()}));
 app.post('/api/blacklist/add', (req,res)=>{
   const phone=(req.body.phone||'').replace(/\D/g,'');
   if(!phone||phone.length<8) return res.status(400).json({ok:false,error:'Numéro invalide'});
@@ -958,8 +914,8 @@ app.post('/api/blacklist/add', (req,res)=>{
 });
 app.post('/api/blacklist/remove', (req,res)=>{
   const phone=(req.body.phone||'').replace(/\D/g,'');
-  const list=loadBlacklist().filter(p=>p.replace(/\D/g,'')!==phone);
-  saveBlacklist(list); res.json({ok:true,total:list.length});
+  saveBlacklist(loadBlacklist().filter(p=>p.replace(/\D/g,'')!==phone));
+  res.json({ok:true,total:loadBlacklist().length});
 });
 
 app.post('/api/blacklist/import', upload.single('file'), (req,res)=>{
@@ -973,8 +929,7 @@ app.post('/api/blacklist/import', upload.single('file'), (req,res)=>{
       const phone=(row.telephone||row.phone||Object.values(row)[0]||'').replace(/\D/g,'');
       if(phone&&phone.length>=8&&!list.includes(phone)){list.push(phone);added++;}
     }
-    saveBlacklist(list);
-    total=list.length;
+    saveBlacklist(list); total=list.length;
   } catch(e){
     return res.status(400).json({ok:false,error:e.message});
   } finally {
@@ -983,9 +938,7 @@ app.post('/api/blacklist/import', upload.single('file'), (req,res)=>{
   res.json({ok:true,added,total});
 });
 
-app.get('/api/config',(req,res)=>{
-  res.json({ ...config, dailyLimit: { ..._dailyLimitOverrides } });
-});
+app.get('/api/config',(req,res)=>res.json({ ...config, dailyLimit: { ..._dailyLimitOverrides } }));
 app.post('/api/config',(req,res)=>{
   const allowed=['minDelay','maxDelay','sessionSize','autoResume'];
   for(const k of allowed)if(req.body[k]!==undefined)config[k]=req.body[k];
@@ -998,26 +951,56 @@ app.get('/api/:account/groups',async(req,res)=>{
   const chats=await bot.client.getChats();
   res.json(chats.filter(c=>c.isGroup).map(c=>({name:c.name,count:c.participants?.length||0})));
 });
-app.get('/api/:account/export-group/:name',async(req,res)=>{
-  const bot=requireBot(req,res); if(!bot) return;
-  if(!bot.state.ready) return res.status(400).json({ok:false,error:'Non connecté'});
-  const chats=await bot.client.getChats(); const groupName=decodeURIComponent(req.params.name);
-  const group=chats.find(c=>c.isGroup&&c.name===groupName);
-  if(!group) return res.status(404).json({ok:false,error:'Groupe introuvable'});
-  const rows=[];
-  for(const p of group.participants){
-    let prenom='',nom='';
-    try{const contact=await bot.client.getContactById(`${p.id.user}@c.us`);const displayName=contact.pushname||contact.name||'';const parts=displayName.trim().split(/\s+/);prenom=parts[0]||'';nom=parts.slice(1).join(' ')||'';}catch(e){}
-    rows.push({telephone:`+${p.id.user}`,prenom,nom,admin:p.isAdmin?'Oui':'Non'});
+
+/**
+ * GET /api/:account/export-group/:name
+ *
+ * FIX : getContactById sans timeout ni rate-limit
+ * ───────────────────────────────────────────────────
+ * Les appels getContactById() sont maintenant :
+ *   - Throttlés (EXPORT_GROUP_INTER_DELAY_MS entre chaque)
+ *   - Protégés par un timeout individuel de 5s (withTimeout)
+ *   - Réessayés une fois en cas d'échec (backoff 800ms)
+ *   - Loggés avec progression tous les 25 contacts
+ */
+app.get('/api/:account/export-group/:name', async (req, res) => {
+  const bot = requireBot(req, res); if (!bot) return;
+  if (!bot.state.ready) return res.status(400).json({ ok: false, error: 'Non connecté' });
+
+  const chats     = await bot.client.getChats();
+  const groupName = decodeURIComponent(req.params.name);
+  const group     = chats.find(c => c.isGroup && c.name === groupName);
+  if (!group) return res.status(404).json({ ok: false, error: 'Groupe introuvable' });
+
+  const participants = group.participants || [];
+  const rows         = [];
+  const total        = participants.length;
+
+  console.log(`[export-group] 📤 Export "${groupName}" : ${total} participants`);
+
+  for (let i = 0; i < participants.length; i++) {
+    const p = participants[i];
+
+    // Progression log tous les 25 contacts
+    if (i > 0 && i % 25 === 0) {
+      console.log(`[export-group] ⏳ ${i}/${total} contacts traités...`);
+    }
+
+    const { prenom, nom } = await getContactName(bot.client, p.id.user);
+    rows.push({ telephone: `+${p.id.user}`, prenom, nom, admin: p.isAdmin ? 'Oui' : 'Non' });
+
+    // Délai inter-requêtes pour éviter le rate-limit WA Web
+    if (i < participants.length - 1) await sleep(EXPORT_GROUP_INTER_DELAY_MS);
   }
-  res.setHeader('Content-Type','text/csv');
-  res.setHeader('Content-Disposition',`attachment; filename="${groupName}.csv"`);
-  res.send(stringify(rows,{header:true}));
+
+  console.log(`[export-group] ✅ Export terminé : ${rows.length}/${total} contacts`);
+
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(groupName)}.csv"`);
+  res.send(stringify(rows, { header: true }));
 });
 
 // ─── Routes legacy (Compte 1 uniquement) ─────────────────────────────────────
-// FIX #4 : cancelSchedule ajouté sur /api/pause, /api/clear et /api/reset
-// pour éviter qu'un planning planifié continue à s'exécuter après ces actions.
 app.get('/api/status',(req,res)=>res.json(bots[1].getStatus()));
 app.post('/api/start',(req,res)=>{
   if(!bots[1].state.ready) return res.status(400).json({ok:false,error:'Non connecté'});
@@ -1033,13 +1016,11 @@ app.post('/api/pause',(req,res)=>{
 });
 app.post('/api/clear',(req,res)=>{
   cancelSchedule(bots[1].id);
-  bots[1].clear();
-  res.json({ok:true});
+  bots[1].clear(); res.json({ok:true});
 });
 app.post('/api/reset',(req,res)=>{
   cancelSchedule(bots[1].id);
-  bots[1].reset();
-  res.json({ok:true});
+  bots[1].reset(); res.json({ok:true});
 });
 app.get('/api/groups',async(req,res)=>{if(!bots[1].state.ready)return res.json([]);const c=await bots[1].client.getChats();res.json(c.filter(x=>x.isGroup).map(x=>({name:x.name,count:x.participants?.length||0})));});
 
