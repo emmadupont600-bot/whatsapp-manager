@@ -255,23 +255,6 @@ function removeLocks(dir) {
 }
 
 // ─── FIX export-group : getContactById avec timeout + throttle + retry ────────
-//
-// Problème original :
-//   La boucle for..of appelait getContactById() en rafale, sans délai ni timeout.
-//   Sur un groupe de 100+ membres cela provoquait :
-//     1. Rate-limit WA Web ("rate-overlimit" / ECONNRESET)
-//     2. Hang infini si Puppeteer ne répondait pas (session expirée)
-//     3. Crash Express (timeout côté client) pour les grands groupes
-//
-// Corrections :
-//   - withTimeout()        : rejette la Promise après 5 s pour éviter le hang
-//   - getContactName()     : 1 retry automatique avec backoff 800 ms
-//   - EXPORT_GROUP_INTER_DELAY_MS (120 ms) : throttle < 10 req/s
-//   - Log de progression   : tous les 25 contacts
-
-/**
- * Rejette la Promise `p` après `ms` millisecondes si elle n'est pas résolue.
- */
 function withTimeout(p, ms, label) {
   return new Promise((resolve, reject) => {
     const t = setTimeout(() => reject(new Error(`Timeout ${ms}ms : ${label}`)), ms);
@@ -280,10 +263,6 @@ function withTimeout(p, ms, label) {
   });
 }
 
-/**
- * Récupère prenom/nom d'un participant WA avec timeout individuel + 1 retry.
- * Retourne { prenom: '', nom: '' } en cas d'échec total (silencieux).
- */
 async function getContactName(client, userId, timeoutMs = 5000) {
   const chatId  = `${userId}@c.us`;
   const extract = contact => {
@@ -293,7 +272,7 @@ async function getContactName(client, userId, timeoutMs = 5000) {
   try {
     return extract(await withTimeout(client.getContactById(chatId), timeoutMs, userId));
   } catch (_) {
-    await sleep(800); // backoff avant retry
+    await sleep(800);
     try {
       return extract(await withTimeout(client.getContactById(chatId), timeoutMs, `${userId} retry`));
     } catch (err) {
@@ -303,7 +282,6 @@ async function getContactName(client, userId, timeoutMs = 5000) {
   }
 }
 
-/** Délai inter-requêtes pour rester sous le rate-limit WA Web (< 10 req/s). */
 const EXPORT_GROUP_INTER_DELAY_MS = parseInt(process.env.EXPORT_GROUP_DELAY_MS || '120');
 
 // ─── BotAccount ──────────────────────────────────────────────────────────────
@@ -912,10 +890,60 @@ app.post('/api/blacklist/import', upload.single('file'), (req,res)=>{
 });
 
 app.get('/api/config',(req,res)=>res.json({ ...config, dailyLimit: { ..._dailyLimitOverrides } }));
-app.post('/api/config',(req,res)=>{
-  const allowed=['minDelay','maxDelay','sessionSize','autoResume'];
-  for(const k of allowed)if(req.body[k]!==undefined)config[k]=req.body[k];
-  saveConfig(); res.json({ok:true,config});
+
+/**
+ * POST /api/config
+ *
+ * FIX : expose tous les délais dynamiques (sessionPauseMin/Max, typingMin/Max, linkDelayMin/Max)
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
+ * Avant : seuls minDelay, maxDelay, sessionSize, autoResume étaient modifiables à chaud.
+ * Après : 9 champs numériques + autoResume, avec validation des plages pour chacun.
+ *
+ * Règles de validation :
+ *   - minDelay / maxDelay       : entiers en secondes, 10–3600, min ≤ max
+ *   - sessionSize               : entier 1–100
+ *   - sessionPauseMin/Max       : entiers en secondes, 60–7200, min ≤ max
+ *   - typingMin/Max             : entiers en ms, 500–30000, min ≤ max
+ *   - linkDelayMin/Max          : entiers en ms, 1000–60000, min ≤ max
+ *   - autoResume                : booléen
+ */
+app.post('/api/config', (req, res) => {
+  const errors = [];
+
+  // ── Helpers ──────────────────────────────────────────────────────────────
+  const setInt = (key, min, max) => {
+    if (req.body[key] === undefined) return;
+    const v = parseInt(req.body[key]);
+    if (isNaN(v) || v < min || v > max)
+      errors.push(`${key} doit être un entier entre ${min} et ${max}`);
+    else
+      config[key] = v;
+  };
+
+  // ── Champs numériques ─────────────────────────────────────────────────────
+  setInt('minDelay',        10,    3600);
+  setInt('maxDelay',        10,    3600);
+  setInt('sessionSize',      1,     100);
+  setInt('sessionPauseMin', 60,    7200);
+  setInt('sessionPauseMax', 60,    7200);
+  setInt('typingMin',      500,   30000);
+  setInt('typingMax',      500,   30000);
+  setInt('linkDelayMin',  1000,   60000);
+  setInt('linkDelayMax',  1000,   60000);
+
+  // ── Cohérence min ≤ max ───────────────────────────────────────────────────
+  if (config.minDelay        > config.maxDelay)        errors.push('minDelay doit être ≤ maxDelay');
+  if (config.sessionPauseMin > config.sessionPauseMax) errors.push('sessionPauseMin doit être ≤ sessionPauseMax');
+  if (config.typingMin       > config.typingMax)       errors.push('typingMin doit être ≤ typingMax');
+  if (config.linkDelayMin    > config.linkDelayMax)    errors.push('linkDelayMin doit être ≤ linkDelayMax');
+
+  if (errors.length > 0) return res.status(400).json({ ok: false, errors });
+
+  // ── autoResume (booléen) ──────────────────────────────────────────────────
+  if (req.body.autoResume !== undefined) config.autoResume = Boolean(req.body.autoResume);
+
+  saveConfig();
+  res.json({ ok: true, config });
 });
 
 app.get('/api/:account/groups', async (req,res)=>{
@@ -925,19 +953,6 @@ app.get('/api/:account/groups', async (req,res)=>{
   res.json(chats.filter(c=>c.isGroup).map(c=>({name:c.name,count:c.participants?.length||0})));
 });
 
-/**
- * GET /api/:account/export-group/:name
- *
- * FIX : getContactById sans timeout ni throttle
- * ─────────────────────────────────────────────
- * Chaque participant est résolu via getContactName() qui :
- *   1. Impose un timeout individuel de 5 s (withTimeout)
- *   2. Retry automatique après 800 ms en cas d'échec
- *   3. Renvoie prenom/nom vides silencieusement si les 2 tentatives échouent
- * Un délai de EXPORT_GROUP_INTER_DELAY_MS (120 ms) est inséré entre chaque
- * participant pour rester sous le rate-limit WA Web (< 10 req/s).
- * Un log de progression est émis tous les 25 contacts.
- */
 app.get('/api/:account/export-group/:name', async (req, res) => {
   const bot = requireBot(req, res); if (!bot) return;
   if (!bot.state.ready) return res.status(400).json({ ok: false, error: 'Non connecté' });
@@ -955,19 +970,13 @@ app.get('/api/:account/export-group/:name', async (req, res) => {
 
   for (let i = 0; i < participants.length; i++) {
     const p = participants[i];
-
-    if (i > 0 && i % 25 === 0)
-      console.log(`[export-group] ⏳ ${i}/${total} traités...`);
-
+    if (i > 0 && i % 25 === 0) console.log(`[export-group] ⏳ ${i}/${total} traités...`);
     const { prenom, nom } = await getContactName(bot.client, p.id.user);
     rows.push({ telephone: `+${p.id.user}`, prenom, nom, admin: p.isAdmin ? 'Oui' : 'Non' });
-
-    // Throttle : ne pas dépasser ~8 req/s pour éviter le rate-limit WA
     if (i < participants.length - 1) await sleep(EXPORT_GROUP_INTER_DELAY_MS);
   }
 
   console.log(`[export-group] ✅ ${rows.length}/${total} contacts exportés`);
-
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(groupName)}.csv"`);
   res.send(stringify(rows, { header: true }));
