@@ -792,8 +792,8 @@ app.post('/api/:account/start', (req,res)=>{
   cancelSchedule(b.id); b.runQueue(otherBot(b)); res.json({ok:true});
 });
 app.post('/api/:account/pause', (req,res)=>{ const b=requireBot(req,res); if(!b) return; b.state.paused=!b.state.paused; b.log(b.state.paused?'⏸️ Pause':'▶️ Reprise','warn'); res.json({ok:true,paused:b.state.paused}); });
-app.post('/api/:account/clear', (req,res)=>{ const b=requireBot(req,res); if(!b) return; b.clear(); res.json({ok:true}); });
-app.post('/api/:account/reset', (req,res)=>{ const b=requireBot(req,res); if(!b) return; b.reset(); res.json({ok:true}); });
+app.post('/api/:account/clear', (req,res)=>{ const b=requireBot(req,res); if(!b) return; cancelSchedule(b.id); b.clear(); res.json({ok:true}); });
+app.post('/api/:account/reset', (req,res)=>{ const b=requireBot(req,res); if(!b) return; cancelSchedule(b.id); b.reset(); res.json({ok:true}); });
 
 app.post('/api/:account/set-limit', (req,res)=>{
   const b=requireBot(req,res); if(!b) return;
@@ -1015,6 +1015,9 @@ app.get('/api/:account/export-group/:name',async(req,res)=>{
   res.send(stringify(rows,{header:true}));
 });
 
+// ─── Routes legacy (Compte 1 uniquement) ─────────────────────────────────────
+// FIX #4 : cancelSchedule ajouté sur /api/pause, /api/clear et /api/reset
+// pour éviter qu'un planning planifié continue à s'exécuter après ces actions.
 app.get('/api/status',(req,res)=>res.json(bots[1].getStatus()));
 app.post('/api/start',(req,res)=>{
   if(!bots[1].state.ready) return res.status(400).json({ok:false,error:'Non connecté'});
@@ -1022,8 +1025,22 @@ app.post('/api/start',(req,res)=>{
   cancelSchedule(bots[1].id);
   bots[1].runQueue(bots[2]); res.json({ok:true});
 });
-app.post('/api/pause',(req,res)=>{bots[1].state.paused=!bots[1].state.paused;res.json({ok:true});});
-app.post('/api/clear',(req,res)=>{bots[1].clear();res.json({ok:true});});
+app.post('/api/pause',(req,res)=>{
+  cancelSchedule(bots[1].id);
+  bots[1].state.paused=!bots[1].state.paused;
+  bots[1].log(bots[1].state.paused?'⏸️ Pause':'▶️ Reprise','warn');
+  res.json({ok:true,paused:bots[1].state.paused});
+});
+app.post('/api/clear',(req,res)=>{
+  cancelSchedule(bots[1].id);
+  bots[1].clear();
+  res.json({ok:true});
+});
+app.post('/api/reset',(req,res)=>{
+  cancelSchedule(bots[1].id);
+  bots[1].reset();
+  res.json({ok:true});
+});
 app.get('/api/groups',async(req,res)=>{if(!bots[1].state.ready)return res.json([]);const c=await bots[1].client.getChats();res.json(c.filter(x=>x.isGroup).map(x=>({name:x.name,count:x.participants?.length||0})));});
 
 app.listen(PORT,()=>console.log(`WhatsApp Manager → http://localhost:${PORT}`));
