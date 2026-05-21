@@ -283,6 +283,15 @@ function saveConfig() {
 const rand  = (a, b) => a + Math.random() * (b - a);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+function getClientPhone(client) {
+  try {
+    const w = client?.info?.wid;
+    if (w && w.user) return String(w.user).replace(/\D/g, '');
+    if (typeof w === 'string') return w.replace(/\D/g, '');
+  } catch (_) {}
+  return null;
+}
+
 function isPuppeteerNavigationError(msg) {
   return /execution context was destroyed|most likely because of a navigation|target closed|session closed|Protocol error/i.test(msg || '');
 }
@@ -472,35 +481,39 @@ async function resolveOutboundChatId(client, number, logger) {
   return chatId;
 }
 
-async function probeWhatsAppConnection(client, logger) {
-  const page = client.pupPage;
-  if (!page) throw new Error('Navigateur Puppeteer non prêt');
-  const state = await withTimeout(page.evaluate(() => {
+async function probeWhatsAppConnection(client, logger, opts = {}) {
+  const strict = opts.strict === true;
+  const phone = getClientPhone(client);
+  if (!phone) throw new Error('WhatsApp non authentifié (client.info.wid manquant)');
+
+  let store = null;
+  if (client.pupPage) {
     try {
-      const conn = window.Store?.Conn;
-      const sock = window.require?.('WAWebSocketModel')?.Socket;
-      const wid = conn?.wid?._serialized || conn?.me?._serialized || null;
-      return {
-        connected: conn?.connected ?? null,
-        hasSynced: conn?.hasSynced ?? null,
-        wid,
-        stream: sock?.stream ?? null,
-        socketState: sock?.state ?? null,
-      };
+      store = await withTimeout(client.pupPage.evaluate(() => {
+        try {
+          const conn = window.Store?.Conn;
+          const sock = window.require?.('WAWebSocketModel')?.Socket;
+          return { connected: conn?.connected ?? null, stream: sock?.stream ?? null };
+        } catch (e) {
+          return { error: e.message };
+        }
+      }), 12000, 'probe Store');
     } catch (e) {
-      return { error: e.message };
+      if (logger) logger(`⚠️ Probe Store (non bloquant) : ${e.message}`, 'warn');
     }
-  }), 15000, 'probe Store.Conn');
-  if (state.error) throw new Error(state.error);
-  if (state.connected === false) throw new Error('Store.Conn.connected = false');
-  if (!state.wid) throw new Error('Session fantôme : numéro connecté (wid) absent côté WhatsApp Web');
-  const stream = String(state.stream || state.socketState || '').toUpperCase();
-  if (stream.includes('DISCONNECT') || stream === 'CLOSING') {
-    throw new Error(`Socket WhatsApp déconnecté (${state.stream}) — fermez autres sessions Web et Reset Auth`);
   }
-  if (state.hasSynced === false) throw new Error('WhatsApp pas encore synchronisé (hasSynced=false)');
-  if (logger) logger(`🔍 WA OK : wid=${(state.wid || '').slice(0, 18)}… stream=${state.stream || '?'}`, 'info');
-  return state;
+
+  if (strict && store) {
+    if (store.error) throw new Error(store.error);
+    if (store.connected === false) throw new Error('Store.Conn.connected = false');
+    const stream = String(store.stream || '').toUpperCase();
+    if (stream.includes('DISCONNECT') || stream === 'CLOSING') {
+      throw new Error(`Socket déconnecté (${store.stream})`);
+    }
+  }
+
+  if (logger) logger(`🔍 Session OK — +${phone}`, 'info');
+  return { phone, store };
 }
 
 async function sendAndVerify(client, chatId, text, label, logger, chatForTyping = null) {
@@ -515,7 +528,9 @@ async function sendAndVerify(client, chatId, text, label, logger, chatForTyping 
   let msgId = whatsappMsgId(msg);
   if (!msgId) {
     if (logger) logger(`⚠️ sendMessage(${label}) sans id — vérification via fetchMessages...`, 'warn');
-    await verifyMessageInChat(chat, text, null, label);
+    let vChat = chatForTyping;
+    if (!vChat) { try { vChat = await withTimeout(client.getChatById(chatId), 10000, 'verify chat'); } catch (_) {} }
+    if (vChat) await verifyMessageInChat(vChat, text, null, label);
     if (logger) logger(`✔️ Message ${label} confirmé via fetchMessages (sans id)`, 'info');
     return { id: 'verified-no-id', verified: true };
   }
@@ -750,35 +765,43 @@ class BotAccount {
   }
 
   async _schedulePostReadyCheck() {
-    this.state.sessionHealthy = null;
-    await sleep(READY_PROBE_DELAY_MS);
+    await sleep(Math.min(READY_PROBE_DELAY_MS, 5000));
     if (!this.state.ready || !this.client) return;
-    try {
-      await probeWhatsAppConnection(this.client, this.log.bind(this));
-      this.state.sessionHealthy = true;
-      this.log('✅ Session WhatsApp synchronisée avec les serveurs', 'success');
-      const pending = this.state.queue.filter(x => x.status === 'pending').length;
-      if (pending > 0 && config.autoResume && process.env.AUTO_START_ON_READY !== '0' && !this.state.running && !this._dailyLimitReached()) {
-        this.log(`▶️ Reprise auto dans 15s (${pending} contacts) — faites un message test vers vous-même avant si doute`, 'warn');
-        await sleep(15000);
-        if (this.state.ready && this.state.sessionHealthy && !this.state.running) this.runQueue(this._partner);
-      }
-    } catch (e) {
+    const phone = getClientPhone(this.client);
+    if (!phone) {
       this.state.sessionHealthy = false;
-      this.log(`⚠️ Session non fiable : ${e.message}`, 'error');
-      this.log('💡 Envoyez un message test vers votre numéro, ou Reset Auth, ou passez au Compte 2', 'warn');
+      this.log('⚠️ Numéro non détecté — attendez ou Reset Auth', 'warn');
+      return;
+    }
+    this.state.sessionHealthy = true;
+    this.log(`✅ WhatsApp prêt — +${phone}`, 'success');
+    try {
+      await probeWhatsAppConnection(this.client, this.log.bind(this), { strict: false });
+    } catch (e) {
+      this.log(`⚠️ ${e.message}`, 'warn');
+    }
+    const pending = this.state.queue.filter(x => x.status === 'pending').length;
+    if (pending > 0 && config.autoResume && process.env.AUTO_START_ON_READY !== '0' && !this.state.running && !this._dailyLimitReached()) {
+      this.log(`▶️ Reprise automatique : ${pending} contacts restants`, 'warn');
+      this.runQueue(this._partner);
     }
   }
 
   _makeClient() {
     const takeover = process.env.TAKEOVER_ON_CONFLICT === '1';
-    const cacheType = (process.env.WA_WEB_CACHE_TYPE || 'local').toLowerCase();
-    const webVersionCache = cacheType === 'remote'
-      ? { type: 'remote', remotePath: WA_WEB_CACHE_REMOTE, strict: false }
-      : { type: 'local' };
+    const cacheType = (process.env.WA_WEB_CACHE_TYPE || 'none').toLowerCase();
+    let webVersionCache = { type: 'none' };
+    const clientExtra = {};
+    if (cacheType === 'remote') {
+      webVersionCache = { type: 'remote', remotePath: WA_WEB_CACHE_REMOTE, strict: false };
+      clientExtra.webVersion = WA_WEB_VERSION;
+    } else if (cacheType === 'local') {
+      webVersionCache = { type: 'local' };
+      clientExtra.webVersion = WA_WEB_VERSION;
+    }
     return new Client({
       authStrategy: new LocalAuth({ dataPath: this.authPath }),
-      webVersion: WA_WEB_VERSION,
+      ...clientExtra,
       webVersionCache,
       takeoverOnConflict: takeover,
       takeoverTimeoutMs: takeover ? 10000 : 0,
@@ -808,7 +831,7 @@ class BotAccount {
         const phone = info && info.wid ? info.wid.user : '?';
         this.log(`WhatsApp connecté ✅ — Numéro actif : +${phone}`, 'success');
       } catch(_) { this.log('WhatsApp connecté ✅', 'success'); }
-      this.log(`⏳ Vérification session dans ${READY_PROBE_DELAY_MS / 1000}s avant envoi...`, 'info');
+      this.log('⏳ Préparation session...', 'info');
       this._schedulePostReadyCheck().catch(e => this.log(`Erreur probe ready : ${e.message}`, 'error'));
     });
     c.on('message', async msg => {
@@ -952,7 +975,7 @@ class BotAccount {
     if (!this.state.ready) throw new Error('WhatsApp non connecté');
     const number=phone.replace(/\D/g,'');
     const chatId=await resolveOutboundChatId(this.client, number, this.log.bind(this));
-    await probeWhatsAppConnection(this.client, this.log.bind(this));
+    try { await probeWhatsAppConnection(this.client, this.log.bind(this), { strict: false }); } catch (e) { this.log(`⚠️ ${e.message}`, 'warn'); }
     if (!await safeIsRegisteredUser(this.client, chatId, this.log.bind(this))) throw new Error(`+${number} n'est pas sur WhatsApp`);
     const fakeContact={phone:number,prenom:'Test',nom:'Test'};
     const pMsg = personalizeMessage(message||'Message de test 👋',fakeContact);
@@ -975,8 +998,8 @@ class BotAccount {
     const pendingCount = this.state.queue.filter(c => c.status === 'pending').length;
     if (!pendingCount) { this.log('ℹ️ Aucun contact en attente dans la queue', 'warn'); return; }
     if (!this.state.ready) { this.log('❌ WhatsApp non connecté — scannez le QR dans l\'onglet Connexion', 'error'); return; }
-    if (this.state.sessionHealthy === false) {
-      this.log('❌ Session marquée non fiable — Reset Auth ou message test vers vous-même d\'abord', 'error');
+    if (this.state.sessionHealthy === false && !getClientPhone(this.client)) {
+      this.log('❌ WhatsApp non authentifié — scannez le QR', 'error');
       return;
     }
     if (this._dailyLimitReached()) { this.log(`⏸ Quota journalier atteint (${this.state.dailySent}/${this.dailyLimit} msgs WA)`, 'warn'); this.state.limitReached = true; return; }
@@ -1035,10 +1058,6 @@ class BotAccount {
         try {
           const number=contact.phone.replace(/\D/g,'');
           const chatId=await resolveOutboundChatId(this.client, number, this.log.bind(this));
-          if (this.state.sessionHealthy === false) {
-            throw new Error('Session fantôme — Reset Auth requis avant envoi');
-          }
-          await probeWhatsAppConnection(this.client, this.log.bind(this));
           if (isBlacklisted(number)) {
             contact.status='blacklisted'; this.state.stats.blacklisted++;
             this.log(`🚫 Blacklisté : +${number}`,'warn');
@@ -1257,7 +1276,7 @@ app.get('/api/:account/status', (req,res)=>{ const b=requireBot(req,res); if(!b)
 app.post('/api/:account/start', (req,res)=>{
   const b=requireBot(req,res); if(!b) return;
   if(!b.state.ready) return res.status(400).json({ok:false,error:'WhatsApp non connecté — onglet Connexion, scannez le QR code'});
-  if(b.state.sessionHealthy === false) return res.status(400).json({ok:false,error:'Session WhatsApp non fiable — Reset Auth ou envoyez un message test vers votre numéro avant de lancer la queue'});
+  if(b.state.sessionHealthy === false && !getClientPhone(b.client)) return res.status(400).json({ok:false,error:'WhatsApp non authentifié — scannez le QR'});
   const pending = b.state.queue.filter(c => c.status === 'pending').length;
   if (!pending) return res.status(400).json({ok:false,error:'Aucun contact en attente — importez un CSV d\'abord'});
   if (b._dailyLimitReached()) return res.status(400).json({ok:false,error:`Quota atteint (${b.state.dailySent}/${b.dailyLimit} messages WA). Attendez le reset ou augmentez la limite.`,limitReached:true});
@@ -1300,7 +1319,7 @@ app.post('/api/:account/check-session', async (req, res) => {
   const b = requireBot(req, res); if (!b) return;
   if (!b.state.ready) return res.status(400).json({ ok: false, error: 'WhatsApp non connecté' });
   try {
-    await probeWhatsAppConnection(b.client, (m, t) => b.log(m, t));
+    await probeWhatsAppConnection(b.client, (m, t) => b.log(m, t), { strict: false });
     b.state.sessionHealthy = true;
     res.json({ ok: true, sessionHealthy: true, message: 'Session synchronisée' });
   } catch (e) {
