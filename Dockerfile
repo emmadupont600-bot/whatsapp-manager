@@ -48,8 +48,11 @@ ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
 
 WORKDIR /app
 COPY package*.json ./
+# postinstall patch LID : le script doit exister avant npm install
+COPY scripts/patch-wwebjs-lid-getchat.js scripts/patch-wwebjs-lid-getchat.js
 RUN npm install --production
 COPY . .
+RUN node scripts/patch-wwebjs-lid-getchat.js
 RUN mkdir -p /app/.wwebjs_auth /app/data /app/uploads /app/exports
 
 EXPOSE 3000
