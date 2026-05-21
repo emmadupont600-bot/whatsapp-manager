@@ -106,6 +106,8 @@ th{text-align:left;font-size:11px;font-weight:600;color:var(--muted);text-transf
 td{padding:10px 11px;border-bottom:1px solid var(--border)}
 tr:last-child td{border-bottom:none}
 tr:hover td{background:var(--surface2)}
+.name-link{cursor:pointer;color:var(--primary);background:none;border:none;padding:0;font:inherit;font-weight:600;text-align:left}
+.name-link:hover{text-decoration:underline}
 .progress{height:5px;background:var(--surface2);border-radius:99px;overflow:hidden;margin-top:8px}
 .progress-fill{height:100%;background:var(--primary);border-radius:99px;transition:width .4s}
 .progress-row{display:flex;justify-content:space-between;align-items:center;margin-top:5px}
@@ -360,6 +362,7 @@ tr:hover td{background:var(--surface2)}
         <div class="card" id="dup-confirm-box" style="display:none;margin-top:14px;border-color:color-mix(in oklch,var(--yellow) 40%,var(--border))">
           <div class="card-title" style="color:var(--yellow)">⚠️ Doublons détectés — déjà contactés</div>
           <p style="font-size:12px;color:var(--muted);margin-bottom:10px">Ces numéros figurent dans l'historique global. Cochez ceux à réimporter quand même.</p>
+          <div id="dup-pager" style="display:none;gap:8px;align-items:center;margin-bottom:10px;font-size:12px;color:var(--muted)"></div>
           <div class="table-wrap" style="max-height:220px;overflow-y:auto;margin-bottom:12px">
             <table>
               <thead><tr><th style="width:36px"><input type="checkbox" id="dup-select-all" onchange="toggleDupSelectAll(this.checked)"></th><th>Téléphone</th><th>Prénom</th><th>Fois</th><th>Pourquoi (dernier message)</th><th>Dernier envoi</th><th>Cpte</th></tr></thead>
@@ -635,6 +638,12 @@ let expandedHistPhones = new Set();
 function escHtml(s) {
   return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
 }
+function escAttr(s) {
+  return escHtml(s).replace(/'/g, '&#39;');
+}
+function phoneDigits(s) {
+  return String(s || '').replace(/\D/g, '');
+}
 function msgSummary(msg, max = 72) {
   const t = (msg || '').trim().replace(/\s+/g, ' ');
   if (!t) return '—';
@@ -709,15 +718,15 @@ function renderHistory() {
       const whyTitle = escHtml(c.lastMessage || c.message || '');
       const expanded = expandedHistPhones.has(phone);
       rows += `<tr>
-        <td style="font-family:monospace;font-size:12px">${phone}</td>
+        <td style="font-family:monospace;font-size:12px">${escHtml(phone)}</td>
         <td>${prenom ? `<strong>${escHtml(prenom)}</strong>` : ''}${nom ? ' '+escHtml(nom) : prenom ? '' : '—'}</td>
         <td><span class="badge ${count>=3?'badge-yellow':count>=2?'badge-blue':'badge-green'}">${count}×</span></td>
         <td style="font-size:11px;color:var(--muted)">${sentStr}</td>
         <td style="max-width:220px;font-size:12px" title="${whyTitle}">${escHtml(why)}</td>
         <td>${acct}</td>
         <td style="white-space:nowrap">
-          <button class="btn btn-ghost" style="padding:3px 8px;font-size:11px" onclick="toggleHistDetail('${phone}')">${expanded?'▲':'▼'} Détail</button>
-          <button class="btn btn-danger" style="padding:3px 8px;font-size:11px" onclick="deleteHistEntry('${phone}')" title="Retirer de la mémoire (pourrait être recontacté à l'import)">🗑</button>
+          <button class="btn btn-ghost" style="padding:3px 8px;font-size:11px" onclick="toggleHistDetail('${escAttr(phone)}')">${expanded?'▲':'▼'} Détail</button>
+          <button class="btn btn-danger" style="padding:3px 8px;font-size:11px" onclick="deleteHistEntry('${escAttr(phone)}')" title="Retirer de la mémoire (pourrait être recontacté à l'import)">🗑</button>
         </td>
       </tr>`;
       if (expanded) {
@@ -973,6 +982,9 @@ let queuePage = 1;
 const Q_PER_PAGE = 50;
 // CSV files queue
 let pendingCSVFiles = [];
+let dupPage = 1, dupListCache = [];
+const DUP_PER_PAGE = 50;
+let queueTableBound = false;
 let pendingImportContext = null;
 // Notifications
 let notifEnabled = Notification.permission === 'granted';
@@ -1135,8 +1147,14 @@ function switchAccount(n) {
 function showPage(name, el) {
   document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
   document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
-  document.getElementById('page-'+name).classList.add('active');
-  el.classList.add('active');
+  const pageEl = document.getElementById('page-'+name);
+  if (!pageEl) return;
+  pageEl.classList.add('active');
+  if (el) el.classList.add('active');
+  else {
+    const nav = document.querySelector(`.nav-item[onclick*="showPage('${name}'"]`);
+    if (nav) nav.classList.add('active');
+  }
   const label = currentAccount===2 ? 'Compte 2' : 'Compte 1';
   if (name==='dashboard')  document.getElementById('dash-title').textContent   = `Dashboard — ${label}`;
   if (name==='import')     { document.getElementById('import-title').textContent  = `Importer — ${label}`; loadImportHistoryHint(); }
@@ -1404,7 +1422,7 @@ async function sendTestMessage() {
   const r = await fetch(`/api/${currentAccount}/test-message`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phone,message:msg})}).then(r=>r.json()).catch(()=>({ok:false}));
   document.getElementById('test-result').innerHTML = r.ok
     ? '<span class="badge badge-green">✓ Message envoyé !</span>'
-    : `<span class="badge badge-red">Erreur : ${r.error||'inconnue'}</span>`;
+    : `<span class="badge badge-red">Erreur : ${escHtml(r.error||'inconnue')}</span>`;
 }
 
 /* ═══════════════════════════════════════════════════
@@ -1412,7 +1430,7 @@ async function sendTestMessage() {
 ═══════════════════════════════════════════════════ */
 async function loadQueue() {
   try {
-    const r = await fetch(`/api/${currentAccount}/queue?limit=500`).then(r=>r.json());
+    const r = await fetch(`/api/${currentAccount}/queue?limit=5000`).then(r=>r.json());
     queueData = Array.isArray(r) ? r : (r.items||r.queue||[]);
     queuePage = 1;
     renderQueue();
@@ -1442,7 +1460,26 @@ async function removeQueueContact(phone) {
   } catch(e) { alert('Erreur réseau'); }
 }
 
+function bindQueueTableEvents() {
+  if (queueTableBound) return;
+  const tbody = document.getElementById('queue-table');
+  if (!tbody) return;
+  queueTableBound = true;
+  tbody.addEventListener('click', (ev) => {
+    const rm = ev.target.closest('[data-action="queue-remove"]');
+    if (rm) { removeQueueContact(rm.dataset.phone); return; }
+    const nm = ev.target.closest('[data-action="queue-filter-name"]');
+    if (nm) {
+      queueSearch = (nm.dataset.term || '').toLowerCase();
+      document.getElementById('queue-search').value = nm.dataset.term || '';
+      queuePage = 1;
+      renderQueue();
+    }
+  });
+}
+
 function renderQueue() {
+  bindQueueTableEvents();
   let filtered = queueData;
   if (queueFilter !== 'all') {
     if (queueFilter === 'replied') filtered = filtered.filter(c => c.replied === true);
@@ -1458,6 +1495,7 @@ function renderQueue() {
   document.getElementById('queue-count-label').textContent = `${total} contact${total>1?'s':''}`;
 
   const pages = Math.ceil(total/Q_PER_PAGE)||1;
+  if (queuePage > pages) queuePage = pages;
   const page = filtered.slice((queuePage-1)*Q_PER_PAGE, queuePage*Q_PER_PAGE);
 
   const tbody = document.getElementById('queue-table');
@@ -1465,23 +1503,27 @@ function renderQueue() {
     tbody.innerHTML=`<tr><td colspan="7"><div class="empty-state"><div style="font-size:32px">🔍</div><p>Aucun contact pour ce filtre.</p></div></td></tr>`;
   } else {
     tbody.innerHTML = page.map(c=>{
-      const phone = c.phone||c.telephone||'';
+      const phone = phoneDigits(c.phone||c.telephone||'');
       const prenom = c.prenom||c.name||'';
       const nom = c.nom||'';
-      const shortMsg = (c.message||'').substring(0,40)+(c.message&&c.message.length>40?'…':'');
+      const nameLabel = [prenom, nom].filter(Boolean).join(' ').trim() || '—';
+      const nameTerm = (prenom || nom || phone).trim();
+      const shortMsg = escHtml((c.message||'').substring(0,40)+(c.message&&c.message.length>40?'…':''));
       const sentAt = c.sentAt ? new Date(c.sentAt).toLocaleString('fr-FR') : '—';
-      const replyTitle = (c.replyText||'').replace(/"/g,'&quot;');
+      const replyTitle = escAttr(c.replyText||'');
+      const replyShort = escHtml(c.replyText ? (c.replyText.substring(0,28)+(c.replyText.length>28?'…':'')) : '');
       const repliedCell = c.replied
-        ? `<span class="badge badge-blue" title="${replyTitle}">💬 Oui</span>${c.replyText?`<span style="display:block;font-size:10px;color:var(--muted);margin-top:2px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${c.replyText.substring(0,28)}${c.replyText.length>28?'…':''}</span>`:''}`
+        ? `<span class="badge badge-blue" title="${replyTitle}">💬 Oui</span>${c.replyText?`<span style="display:block;font-size:10px;color:var(--muted);margin-top:2px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${replyShort}</span>`:''}`
         : '<span style="color:var(--faint)">—</span>';
+      const nameCell = nameLabel === '—' ? '—' : `<button type="button" class="name-link" data-action="queue-filter-name" data-term="${escAttr(nameTerm)}">${escHtml(nameLabel)}</button>`;
       return `<tr>
-        <td style="font-family:monospace;font-size:12px">${phone}</td>
-        <td>${prenom?`<strong>${prenom}</strong>${nom?' '+nom:''}`:'-'}</td>
+        <td style="font-family:monospace;font-size:12px">${escHtml(phone)}</td>
+        <td>${nameCell}</td>
         <td>${statusBadge(c.status||'pending')}</td>
         <td style="max-width:140px">${repliedCell}</td>
-        <td style="color:var(--muted);max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${(c.message||'').replace(/"/g,'&quot;')}">${shortMsg||'—'}</td>
-        <td style="font-size:11px;color:var(--muted)">${sentAt}</td>
-        <td><button class="btn btn-danger" style="padding:3px 8px;font-size:11px" onclick="removeQueueContact('${phone}')">🗑</button></td>
+        <td style="color:var(--muted);max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escAttr(c.message||'')}">${shortMsg||'—'}</td>
+        <td style="font-size:11px;color:var(--muted)">${escHtml(sentAt)}</td>
+        <td><button type="button" class="btn btn-danger" style="padding:3px 8px;font-size:11px" data-action="queue-remove" data-phone="${escAttr(phone)}">🗑</button></td>
       </tr>`;
     }).join('');
   }
@@ -1680,18 +1722,12 @@ function showImportResult(totalAdded, totalSkipped, errors, link, dupCount = 0) 
   document.getElementById('import-result').innerHTML = html;
 }
 
-function showDuplicatePanel(duplicates) {
-  const seen = new Set();
-  const unique = [];
-  for (const d of duplicates) {
-    const p = (d.phone || '').replace(/\D/g, '');
-    if (!p || seen.has(p)) continue;
-    seen.add(p);
-    unique.push({ ...d, phone: p });
-  }
-  pendingImportContext.duplicates = unique;
+function renderDupTablePage() {
   const tbody = document.getElementById('dup-table');
-  tbody.innerHTML = unique.map(d => {
+  const pages = Math.ceil(dupListCache.length / DUP_PER_PAGE) || 1;
+  if (dupPage > pages) dupPage = pages;
+  const slice = dupListCache.slice((dupPage - 1) * DUP_PER_PAGE, dupPage * DUP_PER_PAGE);
+  tbody.innerHTML = slice.map(d => {
     const sent = d.lastSentAt || d.sentAt;
     const sentStr = sent ? new Date(sent).toLocaleString('fr-FR') : '—';
     const bot = (d.lastBotId || d.botId) ? `N°${d.lastBotId || d.botId}` : '—';
@@ -1700,15 +1736,46 @@ function showDuplicatePanel(duplicates) {
     const detail = (d.contacts && d.contacts.length > 1)
       ? `<div style="font-size:10px;color:var(--muted);margin-top:2px">${d.contacts.length} envois enregistrés</div>` : '';
     return `<tr>
-      <td><input type="checkbox" class="dup-cb" value="${d.phone}" checked></td>
-      <td style="font-family:monospace;font-size:12px">${d.phone}</td>
+      <td><input type="checkbox" class="dup-cb" value="${escAttr(d.phone)}" checked></td>
+      <td style="font-family:monospace;font-size:12px">${escHtml(d.phone)}</td>
       <td>${escHtml(d.prenom || '—')} ${escHtml(d.nom || '')}</td>
       <td><span class="badge badge-yellow">${count}×</span></td>
-      <td style="max-width:200px;font-size:11px" title="${escHtml(d.lastMessage||'')}">${escHtml(why)}${detail}</td>
-      <td style="font-size:11px;color:var(--muted)">${sentStr}</td>
-      <td>${bot}</td>
+      <td style="max-width:200px;font-size:11px" title="${escAttr(d.lastMessage||'')}">${escHtml(why)}${detail}</td>
+      <td style="font-size:11px;color:var(--muted)">${escHtml(sentStr)}</td>
+      <td>${escHtml(bot)}</td>
     </tr>`;
   }).join('');
+  const pager = document.getElementById('dup-pager');
+  if (pages > 1) {
+    pager.style.display = 'flex';
+    let ph = `<span>${dupListCache.length} doublons · page ${dupPage}/${pages}</span>`;
+    if (dupPage > 1) ph += `<button type="button" class="btn btn-ghost" style="padding:4px 10px;font-size:11px" onclick="goDupPage(${dupPage-1})">←</button>`;
+    if (dupPage < pages) ph += `<button type="button" class="btn btn-ghost" style="padding:4px 10px;font-size:11px" onclick="goDupPage(${dupPage+1})">→</button>`;
+    pager.innerHTML = ph;
+  } else {
+    pager.style.display = 'none';
+    pager.innerHTML = '';
+  }
+}
+
+function goDupPage(n) {
+  dupPage = n;
+  renderDupTablePage();
+}
+
+function showDuplicatePanel(duplicates) {
+  const seen = new Set();
+  const unique = [];
+  for (const d of duplicates) {
+    const p = phoneDigits(d.phone);
+    if (!p || seen.has(p)) continue;
+    seen.add(p);
+    unique.push({ ...d, phone: p });
+  }
+  pendingImportContext.duplicates = unique;
+  dupListCache = unique;
+  dupPage = 1;
+  renderDupTablePage();
   document.getElementById('dup-select-all').checked = true;
   document.getElementById('dup-confirm-box').style.display = 'block';
   document.getElementById('dup-confirm-box').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
@@ -1720,8 +1787,9 @@ function toggleDupSelectAll(checked) {
 
 function dismissDuplicatePanel() {
   document.getElementById('dup-confirm-box').style.display = 'none';
+  document.getElementById('dup-pager').style.display = 'none';
   pendingImportContext = null;
-  clearCSVFiles();
+  dupListCache = [];
 }
 
 function getSelectedDupPhones() {
@@ -1776,33 +1844,39 @@ async function importAllCSV() {
 
   pendingImportContext = { message, link, files: [...pendingCSVFiles], duplicates: [], totalAdded: 0, totalSkipped: 0, errors: [] };
 
-  for (const file of pendingCSVFiles) {
-    try {
-      const r = await postImportCSV(file, message, link, []);
-      if (r.ok) {
-        totalAdded += r.added || 0;
-        totalSkipped += r.skippedQueue || r.skipped || 0;
-        if (r.needsConfirmation && r.duplicates && r.duplicates.length) {
-          allDuplicates.push(...r.duplicates);
-        }
-      } else errors.push(file.name+': '+(r.error||'erreur'));
-    } catch(e){ errors.push(file.name+': erreur réseau'); }
+  try {
+    for (const file of pendingCSVFiles) {
+      try {
+        const r = await postImportCSV(file, message, link, []);
+        if (r.ok) {
+          totalAdded += r.added || 0;
+          totalSkipped += r.skippedQueue || r.skipped || 0;
+          if (r.needsConfirmation && r.duplicates && r.duplicates.length) {
+            allDuplicates.push(...r.duplicates);
+          }
+        } else errors.push(file.name+': '+(r.error||'erreur'));
+      } catch(e){ errors.push(file.name+': erreur réseau'); }
+    }
+
+    pendingImportContext.totalAdded = totalAdded;
+    pendingImportContext.totalSkipped = totalSkipped;
+    pendingImportContext.errors = errors;
+
+    if (allDuplicates.length) {
+      showImportResult(totalAdded, totalSkipped, errors, link, allDuplicates.length);
+      showDuplicatePanel(allDuplicates);
+      return;
+    }
+
+    showImportResult(totalAdded, totalSkipped, errors, link);
+    clearCSVFiles();
+    pendingImportContext = null;
+  } catch (e) {
+    document.getElementById('import-result').innerHTML = `<span class="badge badge-red">Erreur import : ${escHtml(e.message)}</span>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '📤 Importer tous les fichiers';
   }
-
-  btn.disabled=false; btn.textContent='📤 Importer tous les fichiers';
-  pendingImportContext.totalAdded = totalAdded;
-  pendingImportContext.totalSkipped = totalSkipped;
-  pendingImportContext.errors = errors;
-
-  if (allDuplicates.length) {
-    showImportResult(totalAdded, totalSkipped, errors, link, allDuplicates.length);
-    showDuplicatePanel(allDuplicates);
-    return;
-  }
-
-  showImportResult(totalAdded, totalSkipped, errors, link);
-  clearCSVFiles();
-  pendingImportContext = null;
 }
 
 function updatePreview() {
