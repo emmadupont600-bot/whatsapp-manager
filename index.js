@@ -7,11 +7,21 @@ const path     = require('path');
 const csv      = require('csv-parse/sync');
 const { stringify } = require('csv-stringify/sync');
 
+// ─── FIX #8 : Gestionnaires globaux d'erreurs non capturées ──────────────────
+process.on('unhandledRejection', (reason) => {
+  console.error('[FATAL] Unhandled rejection:', reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[FATAL] Uncaught exception:', err);
+});
+
 const app  = express();
 const PORT = process.env.PORT || 3000;
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
-const upload = multer({ dest: 'uploads/' });
+
+// FIX #5 : limite de taille fichier upload (10 Mo)
+const upload = multer({ dest: 'uploads/', limits: { fileSize: 10 * 1024 * 1024 } });
 
 // FIX #9 : nettoyage automatique du dossier uploads/.
 const UPLOADS_DIR  = path.join(__dirname, 'uploads');
@@ -36,7 +46,7 @@ function cleanUploadsDir() {
 cleanUploadsDir();
 setInterval(cleanUploadsDir, MAX_AGE_MS);
 
-// ─── FIX #8 : Middleware d'authentification par token Bearer ─────────────────
+// ─── Middleware d'authentification par token Bearer ───────────────────────────
 const AUTH_TOKEN = process.env.AUTH_TOKEN || '';
 function authMiddleware(req, res, next) {
   if (!AUTH_TOKEN) return next();
@@ -66,7 +76,7 @@ function isBlacklisted(phone, cachedList) {
   return list.some(p => p.replace(/\D/g,'') === clean);
 }
 
-// ─── FIX #3 : sent-history en cache mémoire + flush debounce ─────────────────
+// ─── Sent-history en cache mémoire + flush debounce ──────────────────────────
 const SENT_HISTORY_FILE = path.join(__dirname, 'data', 'sent-history.json');
 const SENT_HISTORY_FLUSH_MS = 3000;
 let _sentHistoryCache = null;
@@ -115,7 +125,7 @@ function removeFromSentHistory(phone) {
   _flushSentHistory();
 }
 
-// ─── Planning (scheduled start) ─────────────────────────────────────────────
+// ─── Planning (scheduled start) ──────────────────────────────────────────────
 const schedules = {};
 function cancelSchedule(accountId) {
   if (schedules[accountId]) { clearTimeout(schedules[accountId].timerId); delete schedules[accountId]; }
@@ -147,7 +157,7 @@ function setSchedule(bot, scheduledAt, relayBot) {
   return { ok: true, scheduledAt: new Date(ts).toISOString() };
 }
 
-// ─── Historique de sessions (stats globales) ─────────────────────────────────
+// ─── Historique de sessions (stats globales) ──────────────────────────────────
 const SESSIONS_FILE = path.join(__dirname, 'data', 'sessions.json');
 function loadSessions() {
   if (!fs.existsSync(SESSIONS_FILE)) return [];
@@ -164,7 +174,7 @@ function recordSessionEnd(botId, stats) {
   saveSessions(sessions);
 }
 
-// ─── FIX #11 : persistance des logs sur disque ───────────────────────────────
+// ─── Persistance des logs sur disque ─────────────────────────────────────────
 const MAX_LOG_ENTRIES = 1000;
 const LOG_FLUSH_DEBOUNCE_MS = 2000;
 
@@ -182,7 +192,7 @@ function saveLogs(id, entries) {
   catch(e) { console.error(`[BOT${id}] Erreur écriture logs : ${e.message}`); }
 }
 
-// ─── FIX #10 : dailyLimit dynamique via Proxy ────────────────────────────────
+// ─── dailyLimit dynamique via Proxy ──────────────────────────────────────────
 const DEFAULT_DAILY_LIMIT = parseInt(process.env.DAILY_LIMIT || '300');
 const _dailyLimitOverrides = {};
 const dailyLimitMap = new Proxy(_dailyLimitOverrides, {
@@ -254,7 +264,7 @@ function removeLocks(dir) {
   } catch(e) {}
 }
 
-// ─── FIX export-group : getContactById avec timeout + throttle + retry ────────
+// ─── getContactById avec timeout + throttle + retry ──────────────────────────
 function withTimeout(p, ms, label) {
   return new Promise((resolve, reject) => {
     const t = setTimeout(() => reject(new Error(`Timeout ${ms}ms : ${label}`)), ms);
@@ -284,16 +294,19 @@ async function getContactName(client, userId, timeoutMs = 5000) {
 
 const EXPORT_GROUP_INTER_DELAY_MS = parseInt(process.env.EXPORT_GROUP_DELAY_MS || '120');
 
-// ─── BotAccount ──────────────────────────────────────────────────────────────
+// ─── BotAccount ───────────────────────────────────────────────────────────────
 class BotAccount {
   constructor(id) {
     this.id         = id;
-    this.authPath   = `/app/.wwebjs_auth/account${id}`;
+    // FIX #9 : authPath dynamique (fonctionne hors Docker aussi)
+    this.authPath   = path.join(process.env.AUTH_PATH || '/app', '.wwebjs_auth', `account${id}`);
     this.dataFile   = path.join(__dirname, 'data', `queue_${id}.json`);
     this.client     = null;
     this.retryCount = 0;
-    this._resumeTimer   = null;
-    this._logFlushTimer = null;
+    this._resumeTimer    = null;
+    this._logFlushTimer  = null;
+    this._saveQueueTimer = null; // FIX #2 : debounce saveQueue
+    this._partner        = null; // FIX #1 : référence au bot partenaire
     this.state = {
       qr: null, ready: false, running: false, paused: false,
       queue: [], sessionCount: 0,
@@ -309,6 +322,9 @@ class BotAccount {
     this._autoResume();
     this._initClient();
   }
+
+  // FIX #1 : setter pour le bot partenaire (injecté après instanciation)
+  setPartner(bot) { this._partner = bot; }
 
   get dailyLimit() { return dailyLimitMap[this.id]; }
 
@@ -342,19 +358,49 @@ class BotAccount {
     }
   }
 
+  // FIX #2 : _saveQueue avec debounce pour éviter les écritures disque répétées et la corruption JSON
   _saveQueue() {
+    if (this._saveQueueTimer) return;
+    this._saveQueueTimer = setTimeout(() => {
+      this._saveQueueTimer = null;
+      const dir = path.dirname(this.dataFile);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      try {
+        fs.writeFileSync(this.dataFile, JSON.stringify({
+          queue: this.state.queue, stats: this.state.stats,
+          sessionCount: this.state.sessionCount,
+          dailySent: this.state.dailySent, dailyDate: this.state.dailyDate,
+          windowStart: this.state.windowStart,
+          limitReached: this.state.limitReached, limitReachedAt: this.state.limitReachedAt,
+          resumeAt: this.state.resumeAt, bannedAt: this.state.bannedAt,
+          repliesReceived: this.state.repliesReceived,
+          savedAt: new Date().toISOString()
+        }, null, 2));
+      } catch(e) {
+        console.error(`[BOT${this.id}] Erreur écriture queue : ${e.message}`);
+      }
+    }, 500); // flush max toutes les 500ms
+  }
+
+  // Force une écriture immédiate (utilisé en cas de ban ou fin de session)
+  _saveQueueNow() {
+    if (this._saveQueueTimer) { clearTimeout(this._saveQueueTimer); this._saveQueueTimer = null; }
     const dir = path.dirname(this.dataFile);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(this.dataFile, JSON.stringify({
-      queue: this.state.queue, stats: this.state.stats,
-      sessionCount: this.state.sessionCount,
-      dailySent: this.state.dailySent, dailyDate: this.state.dailyDate,
-      windowStart: this.state.windowStart,
-      limitReached: this.state.limitReached, limitReachedAt: this.state.limitReachedAt,
-      resumeAt: this.state.resumeAt, bannedAt: this.state.bannedAt,
-      repliesReceived: this.state.repliesReceived,
-      savedAt: new Date().toISOString()
-    }, null, 2));
+    try {
+      fs.writeFileSync(this.dataFile, JSON.stringify({
+        queue: this.state.queue, stats: this.state.stats,
+        sessionCount: this.state.sessionCount,
+        dailySent: this.state.dailySent, dailyDate: this.state.dailyDate,
+        windowStart: this.state.windowStart,
+        limitReached: this.state.limitReached, limitReachedAt: this.state.limitReachedAt,
+        resumeAt: this.state.resumeAt, bannedAt: this.state.bannedAt,
+        repliesReceived: this.state.repliesReceived,
+        savedAt: new Date().toISOString()
+      }, null, 2));
+    } catch(e) {
+      console.error(`[BOT${this.id}] Erreur écriture queue (now) : ${e.message}`);
+    }
   }
 
   log(msg, type = 'info') {
@@ -417,7 +463,7 @@ class BotAccount {
   _handleBan(err) {
     this.state.running = false; this.state.bannedAt = new Date().toISOString(); this.state.paused = true;
     this.log(`🚫 BAN / RESTRICTION DÉTECTÉ : ${err.message} — Bot arrêté pour protection`, 'error');
-    this._saveQueue();
+    this._saveQueueNow(); // écriture immédiate en cas de ban
   }
 
   _makeClient() {
@@ -446,9 +492,10 @@ class BotAccount {
       this.retryCount = 0; this.state.ready = true; this.state.qr = null;
       this.log('WhatsApp connecté ✅', 'success');
       const pending = this.state.queue.filter(c => c.status === 'pending').length;
+      // FIX #1 : utiliser this._partner au lieu d'appeler runQueue() sans argument
       if (pending > 0 && !this.state.running && !this._dailyLimitReached()) {
         this.log(`▶️ Reprise automatique : ${pending} contacts restants`, 'warn');
-        this.runQueue();
+        this.runQueue(this._partner);
       }
     });
     c.on('message', async msg => {
@@ -539,6 +586,8 @@ class BotAccount {
     if (this.state.running) return;
     this.state.running = true;
     this.state.limitReached = false;
+    // FIX #7 : reset sessionCount à chaque nouvelle session de bot pour que les pauses fonctionnent
+    this.state.sessionCount = 0;
     const startStats={...this.state.stats}, startTime=Date.now();
     this.log(`🚀 Bot démarré (session ≤${config.sessionSize} msgs, limite/jour : ${this.dailyLimit})`,'success');
 
@@ -559,13 +608,13 @@ class BotAccount {
             else this.log(`⚠️ Doublon ignoré lors du relais : +${cleanPhone}`,'warn');
             c.status='relayed';
           }
-          this._saveQueue(); relayBot._saveQueue();
+          this._saveQueueNow(); relayBot._saveQueueNow();
           if (!relayBot.state.running) relayBot.runQueue(this);
         } else {
           this.log(`⏸ Limite ${this.dailyLimit} atteinte. Quota reset dans ${Math.round(resetIn/3600000*10)/10}h`,'warn');
           if (config.autoResume) this._scheduleAutoResume(relayBot);
         }
-        this._saveQueue(); break;
+        this._saveQueueNow(); break;
       }
 
       if (this.state.sessionCount>0&&this.state.sessionCount%config.sessionSize===0) {
@@ -615,7 +664,7 @@ class BotAccount {
     const failThisRun=this.state.stats.failed-(startStats.failed||0);
     if (sentThisRun+skipThisRun+failThisRun>0)
       recordSessionEnd(this.id,{sent:sentThisRun,skipped:skipThisRun,failed:failThisRun,duration:Math.round((Date.now()-startTime)/1000)});
-    this._saveQueue();
+    this._saveQueueNow();
   }
 
   importCSV(content, defaultMessage, defaultLink, forceIncludeDuplicates = []) {
@@ -672,12 +721,10 @@ class BotAccount {
       autoResume:config.autoResume, bannedAt:this.state.bannedAt,
       repliesReceived:this.state.repliesReceived,
       scheduledAt:schedules[this.id]?.scheduledAt||null,
-      // ── FIX #6 : tous les délais exposés dans le statut ──────────────────
       minDelay:config.minDelay, maxDelay:config.maxDelay, sessionSize:config.sessionSize,
       sessionPauseMin:config.sessionPauseMin, sessionPauseMax:config.sessionPauseMax,
       typingMin:config.typingMin,             typingMax:config.typingMax,
       linkDelayMin:config.linkDelayMin,       linkDelayMax:config.linkDelayMax,
-      // ─────────────────────────────────────────────────────────────────────
       log:this.state.log.slice(0,50)
     };
   }
@@ -708,8 +755,10 @@ class BotAccount {
   }
 }
 
-// ─── Deux comptes ─────────────────────────────────────────────────────────────
+// ─── Deux comptes + injection du partenaire (FIX #1) ─────────────────────────
 const bots={1:new BotAccount(1),2:new BotAccount(2)};
+bots[1].setPartner(bots[2]);
+bots[2].setPartner(bots[1]);
 
 function getBot(req) {
   const id = parseInt(req.params.account || req.query.account || '');
@@ -824,20 +873,22 @@ app.get('/api/:account/export', (req,res)=>{
 app.post('/api/:account/import', upload.single('file'), (req,res)=>{
   const bot=requireBot(req,res); if(!bot) return;
   if (!req.file) return res.status(400).json({ok:false,error:'Fichier manquant'});
+  // FIX #6 : parser forceInclude une seule fois, avant le try, pour éviter le double parse hors try
+  let forceInclude = [];
+  try { forceInclude = JSON.parse(req.body.forceInclude||'[]'); } catch(_) {}
   let result;
   try {
     const content=fs.readFileSync(req.file.path,'utf-8');
     const message=(req.body.message||'').trim();
     const link=(req.body.link||'').trim();
     if(!message) return res.status(400).json({ok:false,error:'Message vide'});
-    const force=JSON.parse(req.body.forceInclude||'[]');
-    result=bot.importCSV(content,message,link,force);
+    result=bot.importCSV(content,message,link,forceInclude);
   } catch(e){
     return res.status(400).json({ok:false,error:e.message});
   } finally {
     try { fs.unlinkSync(req.file.path); } catch(_) {}
   }
-  if(result.duplicates.length>0&&!(JSON.parse(req.body.forceInclude||'[]').length>0))
+  if(result.duplicates.length>0&&!forceInclude.length)
     res.json({ok:true,...result,needsConfirmation:true});
   else
     res.json({ok:true,...result,needsConfirmation:false});
@@ -896,26 +947,8 @@ app.post('/api/blacklist/import', upload.single('file'), (req,res)=>{
 
 app.get('/api/config',(req,res)=>res.json({ ...config, dailyLimit: { ..._dailyLimitOverrides } }));
 
-/**
- * POST /api/config
- *
- * FIX #6 : expose tous les délais dynamiques (sessionPauseMin/Max, typingMin/Max, linkDelayMin/Max)
- * ─────────────────────────────────────────────────────────────────────────────────────────────────
- * Avant : seuls minDelay, maxDelay, sessionSize, autoResume étaient modifiables à chaud.
- * Après : 9 champs numériques + autoResume, avec validation des plages pour chacun.
- *
- * Règles de validation :
- *   - minDelay / maxDelay       : entiers en secondes, 10–3600, min ≤ max
- *   - sessionSize               : entier 1–100
- *   - sessionPauseMin/Max       : entiers en secondes, 60–7200, min ≤ max
- *   - typingMin/Max             : entiers en ms, 500–30000, min ≤ max
- *   - linkDelayMin/Max          : entiers en ms, 1000–60000, min ≤ max
- *   - autoResume                : booléen
- */
 app.post('/api/config', (req, res) => {
   const errors = [];
-
-  // ── Helpers ──────────────────────────────────────────────────────────────
   const setInt = (key, min, max) => {
     if (req.body[key] === undefined) return;
     const v = parseInt(req.body[key]);
@@ -924,8 +957,6 @@ app.post('/api/config', (req, res) => {
     else
       config[key] = v;
   };
-
-  // ── Champs numériques ─────────────────────────────────────────────────────
   setInt('minDelay',        10,    3600);
   setInt('maxDelay',        10,    3600);
   setInt('sessionSize',      1,     100);
@@ -935,34 +966,40 @@ app.post('/api/config', (req, res) => {
   setInt('typingMax',      500,   30000);
   setInt('linkDelayMin',  1000,   60000);
   setInt('linkDelayMax',  1000,   60000);
-
-  // ── Cohérence min ≤ max ───────────────────────────────────────────────────
   if (config.minDelay        > config.maxDelay)        errors.push('minDelay doit être ≤ maxDelay');
   if (config.sessionPauseMin > config.sessionPauseMax) errors.push('sessionPauseMin doit être ≤ sessionPauseMax');
   if (config.typingMin       > config.typingMax)       errors.push('typingMin doit être ≤ typingMax');
   if (config.linkDelayMin    > config.linkDelayMax)    errors.push('linkDelayMin doit être ≤ linkDelayMax');
-
   if (errors.length > 0) return res.status(400).json({ ok: false, errors });
-
-  // ── autoResume (booléen) ──────────────────────────────────────────────────
   if (req.body.autoResume !== undefined) config.autoResume = Boolean(req.body.autoResume);
-
   saveConfig();
   res.json({ ok: true, config });
 });
 
+// FIX #3 : try/catch sur getChats() pour éviter crash si client déconnecté entre le check ready et l'appel
 app.get('/api/:account/groups', async (req,res)=>{
   const bot=requireBot(req,res); if(!bot) return;
   if(!bot.state.ready) return res.json([]);
-  const chats=await bot.client.getChats();
-  res.json(chats.filter(c=>c.isGroup).map(c=>({name:c.name,count:c.participants?.length||0})));
+  try {
+    const chats=await bot.client.getChats();
+    res.json(chats.filter(c=>c.isGroup).map(c=>({name:c.name,count:c.participants?.length||0})));
+  } catch(e) {
+    res.status(500).json({ok:false,error:`Erreur récupération groupes : ${e.message}`});
+  }
 });
 
+// FIX #3 + FIX #4 : try/catch + timeout global sur export-group
 app.get('/api/:account/export-group/:name', async (req, res) => {
   const bot = requireBot(req, res); if (!bot) return;
   if (!bot.state.ready) return res.status(400).json({ ok: false, error: 'Non connecté' });
 
-  const chats     = await bot.client.getChats();
+  let chats;
+  try {
+    chats = await bot.client.getChats();
+  } catch(e) {
+    return res.status(500).json({ ok: false, error: `Impossible de récupérer les chats : ${e.message}` });
+  }
+
   const groupName = decodeURIComponent(req.params.name);
   const group     = chats.find(c => c.isGroup && c.name === groupName);
   if (!group) return res.status(404).json({ ok: false, error: 'Groupe introuvable' });
@@ -971,9 +1008,19 @@ app.get('/api/:account/export-group/:name', async (req, res) => {
   const total        = participants.length;
   const rows         = [];
 
+  // FIX #4 : timeout global de 3 minutes pour toute la route export-group
+  const GLOBAL_TIMEOUT_MS = 3 * 60 * 1000;
+  const deadline = Date.now() + GLOBAL_TIMEOUT_MS;
+
   console.log(`[export-group] 📤 "${groupName}" — ${total} participants`);
 
   for (let i = 0; i < participants.length; i++) {
+    // FIX #4 : vérifier si la connexion client est encore ouverte et si le timeout global est dépassé
+    if (res.writableEnded) { console.warn('[export-group] ⚠️ Connexion client fermée, arrêt.'); return; }
+    if (Date.now() > deadline) {
+      console.warn(`[export-group] ⚠️ Timeout global atteint après ${i} contacts — export partiel envoyé`);
+      break;
+    }
     const p = participants[i];
     if (i > 0 && i % 25 === 0) console.log(`[export-group] ⏳ ${i}/${total} traités...`);
     const { prenom, nom } = await getContactName(bot.client, p.id.user);
@@ -982,6 +1029,7 @@ app.get('/api/:account/export-group/:name', async (req, res) => {
   }
 
   console.log(`[export-group] ✅ ${rows.length}/${total} contacts exportés`);
+  if (res.writableEnded) return;
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(groupName)}.csv"`);
   res.send(stringify(rows, { header: true }));
@@ -1009,6 +1057,14 @@ app.post('/api/reset',(req,res)=>{
   cancelSchedule(bots[1].id);
   bots[1].reset(); res.json({ok:true});
 });
-app.get('/api/groups',async(req,res)=>{if(!bots[1].state.ready)return res.json([]);const c=await bots[1].client.getChats();res.json(c.filter(x=>x.isGroup).map(x=>({name:x.name,count:x.participants?.length||0})));});
+app.get('/api/groups',async(req,res)=>{
+  if(!bots[1].state.ready) return res.json([]);
+  try {
+    const c=await bots[1].client.getChats();
+    res.json(c.filter(x=>x.isGroup).map(x=>({name:x.name,count:x.participants?.length||0})));
+  } catch(e) {
+    res.status(500).json({ok:false,error:e.message});
+  }
+});
 
 app.listen(PORT,()=>console.log(`WhatsApp Manager → http://localhost:${PORT}`));
