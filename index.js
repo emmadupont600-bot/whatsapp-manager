@@ -36,6 +36,7 @@ const WA_WEB_VERSION = process.env.WA_WEB_VERSION || '2.3000.1038602566-alpha';
 const WA_WEB_CACHE_REMOTE = process.env.WA_WEB_CACHE_REMOTE || 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/{version}.html';
 const READY_PROBE_DELAY_MS = parseInt(process.env.READY_PROBE_DELAY_MS || '20000', 10);
 const MSG_ACK_TIMEOUT_MS = parseInt(process.env.MSG_ACK_TIMEOUT_MS || '25000', 10);
+const REQUIRE_ACK_DEVICE = process.env.REQUIRE_ACK_DEVICE === '1';
 const MANUAL_SEARCH_FLOW = process.env.MANUAL_SEARCH_FLOW !== '0';
 const COLD_OPENER_DELAY_MS = parseInt(process.env.COLD_OPENER_DELAY_MS || '8000', 10);
 
@@ -45,7 +46,7 @@ function getColdOpenerText() {
 }
 
 function useAckColdSoft() {
-  return process.env.ACK_COLD_SOFT !== '0';
+  return process.env.ACK_COLD_SOFT === '1';
 }
 
 
@@ -473,7 +474,8 @@ async function waitForMessageAck(client, msgId, label) {
         client.removeListener('message_ack', onAck);
         reject(new Error(`WhatsApp a rejeté le message (${label}) — compte peut-être restreint / signalé`));
       }
-      if (ack >= MessageAck.ACK_SERVER) {
+      const minAck = REQUIRE_ACK_DEVICE ? MessageAck.ACK_DEVICE : MessageAck.ACK_SERVER;
+      if (ack >= minAck) {
         clearTimeout(timer);
         client.removeListener('message_ack', onAck);
         resolve(ack);
@@ -498,12 +500,18 @@ function isGhostSessionError(err) {
   return /session fant[oô]me|identiques|silencieux/i.test(m);
 }
 
+function messageAckIsDelivered(ack) {
+  if (ack === undefined || ack === null) return null;
+  if (ack === MessageAck.ACK_ERROR) return false;
+  return ack >= MessageAck.ACK_SERVER;
+}
+
 async function verifyMessageInChat(chat, text, msgId, label, opts = {}) {
-  const { softFail = false, logger = null } = opts;
+  const { softFail = false, logger = null, maxAgeMs = 45000, strict = true } = opts;
   await sleep(2500);
   let messages;
   try {
-    messages = await withTimeout(chat.fetchMessages({ limit: 20 }), 12000, `fetchMessages verify ${label}`);
+    messages = await withTimeout(chat.fetchMessages({ limit: 25 }), 12000, `fetchMessages verify ${label}`);
   } catch (e) {
     if (isWhatsAppFetchBug(e) && softFail) {
       if (logger) logger(`⚠️ Vérification historique ignorée (${label}) : bug fetchMessages WhatsApp Web`, 'warn');
@@ -511,12 +519,39 @@ async function verifyMessageInChat(chat, text, msgId, label, opts = {}) {
     }
     throw e;
   }
-  const recent = messages.filter(m => m.fromMe && (Date.now() - m.timestamp * 1000) < 90000);
-  const byBody = recent.filter(m => (m.body || '').trim() === (text || '').trim());
-  const byId = msgId ? recent.filter(m => whatsappMsgId(m) === msgId) : [];
-  if (byBody.length === 0 && byId.length === 0) {
-    throw new Error(`Message "${label}" absent de l'historique WhatsApp — session fantôme ou envoi silencieux`);
+  const now = Date.now();
+  const recent = messages.filter(m => m.fromMe && (now - m.timestamp * 1000) < maxAgeMs);
+  const trimmed = (text || '').trim();
+
+  const checkAck = (m) => {
+    const delivered = messageAckIsDelivered(m.ack);
+    if (delivered === false) {
+      throw new Error(`Message "${label}" rejeté par WhatsApp (ACK_ERROR) — non livré sur le téléphone du destinataire`);
+    }
+    return m;
+  };
+
+  if (msgId && msgId !== 'verified-no-id' && msgId !== 'ui-sent') {
+    const byId = recent.filter(m => whatsappMsgId(m) === msgId);
+    if (byId.length) {
+      checkAck(byId.sort((a, b) => b.timestamp - a.timestamp)[0]);
+      return true;
+    }
   }
+
+  if (!trimmed) throw new Error(`Message "${label}" corps vide — vérification impossible`);
+
+  const byBody = recent.filter(m => (m.body || '').trim() === trimmed);
+  if (!byBody.length) {
+    throw new Error(`Message "${label}" absent du chat récent — non livré (session fantôme ou mauvais fil)`);
+  }
+  const newest = byBody.sort((a, b) => b.timestamp - a.timestamp)[0];
+  const latestFromMe = recent.sort((a, b) => b.timestamp - a.timestamp)[0];
+  if (strict && latestFromMe && whatsappMsgId(latestFromMe) !== whatsappMsgId(newest)) {
+    throw new Error(`Message "${label}" n'est pas le dernier envoyé — vérification refusée`);
+  }
+  checkAck(newest);
+  if (logger) logger(`✔️ Vérifié dans le chat (${label}, ${Math.round((now - newest.timestamp * 1000) / 1000)}s)`, 'info');
   return true;
 }
 
@@ -580,7 +615,9 @@ async function openChatViaStore(client, phoneDigits, logger) {
   }
 }
 
-async function sendTextViaComposerUI(page, text, logger, label) {
+async function sendTextViaComposerUI(client, cusChatId, text, logger, label) {
+  const page = client.pupPage;
+  if (!page) return false;
   const selectors = [
     'footer div[contenteditable="true"][data-tab="10"]',
     '#main footer div[contenteditable="true"][role="textbox"]',
@@ -602,9 +639,17 @@ async function sendTextViaComposerUI(page, text, logger, label) {
       await page.keyboard.type(text, { delay: 35 });
       await sleep(400);
       await page.keyboard.press('Enter');
-      if (logger) logger(`⌨️ Envoyé via zone de saisie WhatsApp (${label})`, 'info');
-      await sleep(2000);
-      return true;
+      if (logger) logger(`⌨️ Saisie UI (${label}) — vérification livraison...`, 'info');
+      await sleep(3500);
+      try {
+        const chat = await withTimeout(client.getChatById(cusChatId), 12000, 'verify UI send');
+        await verifyMessageInChat(chat, text, null, label, { strict: true, maxAgeMs: 35000, logger });
+        if (logger) logger(`✔️ Message UI confirmé dans le chat (${label})`, 'info');
+        return true;
+      } catch (verr) {
+        if (logger) logger(`❌ UI composer : pas confirmé dans le chat — ${verr.message}`, 'error');
+        return false;
+      }
     } catch (e) {
       if (logger) logger(`⚠️ UI composer (${sel}) : ${e.message}`, 'warn');
     }
@@ -949,8 +994,8 @@ async function sendSingleOutbound(client, chatId, text, label, logger, prefetche
   const useUi = process.env.UI_SEND_OPENER !== '0' && (opts.viaUi || label === 'hey-ui' || label === 'opener-ui');
   if (useUi && client.pupPage && (label.includes('hey') || label.includes('opener') || opts.viaUi)) {
     await openChatViaStore(client, pn, logger);
-    const uiOk = await sendTextViaComposerUI(client.pupPage, text, logger, label);
-    if (uiOk) return { id: 'ui-sent', verified: true, viaUi: true };
+    const uiOk = await sendTextViaComposerUI(client, normalizeOutboundChatId(chatId, pn), text, logger, label);
+    if (uiOk) return { id: 'ui-verified', verified: true, viaUi: true };
     if (logger) logger(`⚠️ Envoi UI échoué (${label}) — repli API`, 'warn');
   }
   return sendAndVerify(client, chatId, text, label, logger, prefetchedChat, pn, opts);
@@ -1006,10 +1051,16 @@ async function sendAndVerify(client, chatId, text, label, logger, chatForTyping 
     if (/rejeté|ACK_ERROR/i.test(ackErr.message)) {
       if (opts.ackSoft && verifyChat) {
         try {
-          await verifyMessageInChat(verifyChat, text, msgId, label, { softFail: false, logger });
-          if (logger) logger(`⚠️ ACK_ERROR mais message visible (${label}) — envoi accepté (comme manuel)`, 'warn');
-          return { id: msgId, verified: true, ackSoftOk: true };
-        } catch (_) {}
+          await verifyMessageInChat(verifyChat, text, msgId, label, { softFail: false, logger, strict: true });
+          if (logger) logger(`⚠️ ACK_ERROR mais trace dans le chat (${label}) — vérifiez sur votre téléphone`, 'warn');
+          if (useAckColdSoft()) {
+            return { id: msgId, verified: true, ackSoftOk: true };
+          }
+        } catch (verifyErr) {
+          if (logger) logger(`❌ ACK_ERROR + absent du chat (${label}) — message NON livré`, 'error');
+        }
+      } else if (logger) {
+        logger(`❌ WhatsApp ACK_ERROR (${label}) — message probablement non livré au destinataire`, 'error');
       }
       throw new Error(ackErr.message);
     }
@@ -1519,9 +1570,9 @@ class BotAccount {
       let openerResult;
       if (process.env.UI_SEND_OPENER !== '0') {
         await openChatViaStore(this.client, number, this.log.bind(this));
-        const uiHey = await sendTextViaComposerUI(this.client.pupPage, openerText, this.log.bind(this), 'hey');
+        const uiHey = await sendTextViaComposerUI(this.client, sendId, openerText, this.log.bind(this), 'hey');
         openerResult = uiHey
-          ? { messageCount: 1, ids: ['ui-sent'], lastId: 'ui-sent' }
+          ? { messageCount: 1, ids: ['ui-verified'], lastId: 'ui-verified' }
           : await this._sendMessage(sendId, openerText, '', prefetchedChat, { ...sendOpts, manualOpener: true });
       } else {
         openerResult = await this._sendMessage(sendId, openerText, '', prefetchedChat, sendOpts);
@@ -1874,7 +1925,7 @@ app.get('/api/health', (req, res) => {
     ok: true,
     version: APP_VERSION,
     commit: BUILD_COMMIT,
-    features: { resetAuth: true, ghostDetection: true, messageAck: true, combinedLinkMessage: !useSplitLinkMessages(), coldContactSync: true, manualSearchFlow: true, coldOpener: true, ackColdSoft: true, manualSearchDom: true, manualRouteSplit: true },
+    features: { resetAuth: true, ghostDetection: true, messageAck: true, combinedLinkMessage: !useSplitLinkMessages(), coldContactSync: true, manualSearchFlow: true, coldOpener: true, ackColdSoft: false, manualSearchDom: true, manualRouteSplit: true },
     resetAuthOnStart: [...RESET_AUTH_ON_START],
     uptimeSec: Math.round(process.uptime()),
   });
