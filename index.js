@@ -403,9 +403,11 @@ async function getChat(client, chatId, logger) {
 function idsLookDuplicate(a, b) {
   if (!a || !b) return false;
   if (a === b) return true;
-  const na = a.replace(/@.*$/, '').slice(0, 28);
-  const nb = b.replace(/@.*$/, '').slice(0, 28);
-  return na.length > 10 && na === nb;
+  const na = (a || '').replace(/@.*$/, '');
+  const nb = (b || '').replace(/@.*$/, '');
+  if (na === nb) return true;
+  if (na.length > 12 && nb.length > 12 && na.slice(0, 16) === nb.slice(0, 16)) return true;
+  return false;
 }
 
 function assertDistinctMessageIds(ids) {
@@ -455,6 +457,21 @@ async function verifyMessageInChat(chat, text, msgId, label) {
   }
 }
 
+async function resolveOutboundChatId(client, number, logger) {
+  const pn = String(number).replace(/\D/g, '');
+  let chatId = `${pn}@c.us`;
+  try {
+    const wid = await withTimeout(client.getNumberId(pn), 10000, `getNumberId(${pn})`);
+    if (wid && wid._serialized) {
+      chatId = wid._serialized;
+      if (logger) logger(`📇 ID WhatsApp résolu pour +${pn} → ${chatId}`, 'info');
+    }
+  } catch (e) {
+    if (logger) logger(`⚠️ getNumberId(${pn}) : ${e.message} — utilisation ${chatId}`, 'warn');
+  }
+  return chatId;
+}
+
 async function probeWhatsAppConnection(client, logger) {
   const page = client.pupPage;
   if (!page) throw new Error('Navigateur Puppeteer non prêt');
@@ -462,11 +479,13 @@ async function probeWhatsAppConnection(client, logger) {
     try {
       const conn = window.Store?.Conn;
       const sock = window.require?.('WAWebSocketModel')?.Socket;
+      const wid = conn?.wid?._serialized || conn?.me?._serialized || null;
       return {
         connected: conn?.connected ?? null,
-        ref: conn?.ref ?? null,
+        hasSynced: conn?.hasSynced ?? null,
+        wid,
         stream: sock?.stream ?? null,
-        state: sock?.state ?? null,
+        socketState: sock?.state ?? null,
       };
     } catch (e) {
       return { error: e.message };
@@ -474,12 +493,25 @@ async function probeWhatsAppConnection(client, logger) {
   }), 15000, 'probe Store.Conn');
   if (state.error) throw new Error(state.error);
   if (state.connected === false) throw new Error('Store.Conn.connected = false');
-  if (logger) logger(`🔍 WA Store : connected=${state.connected} stream=${state.stream || '?'}`, 'info');
+  if (!state.wid) throw new Error('Session fantôme : numéro connecté (wid) absent côté WhatsApp Web');
+  const stream = String(state.stream || state.socketState || '').toUpperCase();
+  if (stream.includes('DISCONNECT') || stream === 'CLOSING') {
+    throw new Error(`Socket WhatsApp déconnecté (${state.stream}) — fermez autres sessions Web et Reset Auth`);
+  }
+  if (state.hasSynced === false) throw new Error('WhatsApp pas encore synchronisé (hasSynced=false)');
+  if (logger) logger(`🔍 WA OK : wid=${(state.wid || '').slice(0, 18)}… stream=${state.stream || '?'}`, 'info');
   return state;
 }
 
-async function sendAndVerify(client, chat, chatId, text, label, logger) {
-  const msg = await withTimeout(chat.sendMessage(text), 20000, `sendMessage(${label})`);
+async function sendAndVerify(client, chatId, text, label, logger, chatForTyping = null) {
+  if (chatForTyping) {
+    try {
+      await chatForTyping.sendStateTyping();
+      await sleep(rand(config.typingMin, config.typingMax));
+      await chatForTyping.clearState();
+    } catch (_) {}
+  }
+  const msg = await withTimeout(client.sendMessage(chatId, text, { sendSeen: false }), 25000, `client.sendMessage(${label})`);
   let msgId = whatsappMsgId(msg);
   if (!msgId) {
     if (logger) logger(`⚠️ sendMessage(${label}) sans id — vérification via fetchMessages...`, 'warn');
@@ -493,7 +525,11 @@ async function sendAndVerify(client, chat, chatId, text, label, logger) {
   } catch (ackErr) {
     if (logger) logger(`⚠️ ${ackErr.message} — double-check historique...`, 'warn');
   }
-  await verifyMessageInChat(chat, text, msgId, label);
+  let verifyChat = chatForTyping;
+  if (!verifyChat) {
+    try { verifyChat = await withTimeout(client.getChatById(chatId), 10000, 'getChat verify'); } catch (_) {}
+  }
+  if (verifyChat) await verifyMessageInChat(verifyChat, text, msgId, label);
   return { id: msgId, verified: true };
 }
 
@@ -869,23 +905,27 @@ class BotAccount {
   async _typing(chat)   { try { await chat.sendStateTyping(); await sleep(rand(config.typingMin,config.typingMax)); await chat.clearState(); } catch(e) {} }
 
   async _sendMessage(chatId, rawMsg, link) {
-    const chat = await getChat(this.client, chatId, this.log.bind(this));
     const ids  = [];
-    const doSend = async (text, label) => {
-      const result = await sendAndVerify(this.client, chat, chatId, text, label, this.log.bind(this));
-      ids.push(result.id); return result.id;
+    let chat = null;
+    try { chat = await getChat(this.client, chatId, this.log.bind(this)); } catch (e) {
+      this.log(`⚠️ getChatById pour typing : ${e.message}`, 'warn');
+    }
+    const doSend = async (text, label, useTypingChat) => {
+      const result = await sendAndVerify(this.client, chatId, text, label, this.log.bind(this), useTypingChat);
+      ids.push(result.id);
+      return result.id;
     };
     if (link && link.trim()) {
       const text = (rawMsg || '').trim();
       if (text) {
         await this._typing(chat);
-        await doSend(text, 'texte');
+        await doSend(text, 'texte', chat);
         const delay = rand(config.linkDelayMin, config.linkDelayMax);
         this.log(`⏱ Délai anti-ban avant lien : ${(delay/1000).toFixed(1)}s`, 'info');
         await sleep(delay);
       }
       await this._typing(chat);
-      await doSend(link.trim(), 'lien');
+      await doSend(link.trim(), 'lien', null);
       assertDistinctMessageIds(ids);
       return { messageCount: text ? 2 : 1, ids, lastId: ids[ids.length - 1] };
     }
@@ -893,18 +933,18 @@ class BotAccount {
     if (parts) {
       if (parts.text) {
         await this._typing(chat);
-        await doSend(parts.text, 'texte');
+        await doSend(parts.text, 'texte', chat);
         await sleep(rand(config.linkDelayMin, config.linkDelayMax));
-        await doSend(parts.url, 'lien');
+        await doSend(parts.url, 'lien', null);
         assertDistinctMessageIds(ids);
         return { messageCount: 2, ids, lastId: ids[ids.length - 1] };
       }
       await this._typing(chat);
-      await doSend(parts.url, 'url-seule');
+      await doSend(parts.url, 'url-seule', chat);
       return { messageCount: 1, ids, lastId: ids[ids.length - 1] };
     }
     await this._typing(chat);
-    await doSend(rawMsg, 'texte-simple');
+    await doSend(rawMsg, 'texte-simple', chat);
     return { messageCount: 1, ids, lastId: ids[ids.length - 1] };
   }
 
@@ -991,7 +1031,12 @@ class BotAccount {
         contact.status='processing'; this._saveQueue(true);
 
         try {
-          const number=contact.phone.replace(/\D/g,''), chatId=`${number}@c.us`;
+          const number=contact.phone.replace(/\D/g,'');
+          const chatId=await resolveOutboundChatId(this.client, number, this.log.bind(this));
+          if (this.state.sessionHealthy === false) {
+            throw new Error('Session fantôme — Reset Auth requis avant envoi');
+          }
+          await probeWhatsAppConnection(this.client, this.log.bind(this));
           if (isBlacklisted(number)) {
             contact.status='blacklisted'; this.state.stats.blacklisted++;
             this.log(`🚫 Blacklisté : +${number}`,'warn');
