@@ -32,10 +32,8 @@ body{font-family:var(--font);background:var(--bg);color:var(--text);min-height:1
 .logo{display:flex;align-items:center;gap:10px;padding:0 8px 18px;border-bottom:1px solid var(--border);margin-bottom:8px}
 .logo svg{color:var(--primary)}.logo span{font-size:15px;font-weight:700}
 .logo-right{margin-left:auto;display:flex;align-items:center;gap:8px}
-/* theme toggle */
 .theme-btn{background:none;border:1px solid var(--border);border-radius:var(--radius-sm);padding:4px 7px;cursor:pointer;color:var(--muted);font-size:14px;line-height:1;transition:all .15s}
 .theme-btn:hover{color:var(--text);border-color:var(--muted)}
-/* notif bell */
 .notif-btn{background:none;border:1px solid var(--border);border-radius:var(--radius-sm);padding:4px 7px;cursor:pointer;color:var(--muted);font-size:14px;line-height:1;position:relative;transition:all .15s}
 .notif-btn:hover{color:var(--text);border-color:var(--muted)}
 .notif-btn.active{color:var(--green);border-color:var(--green)}
@@ -143,6 +141,11 @@ tr:hover td{background:var(--surface2)}
 /* ── SCHEDULE ─────────────────────────────────*/
 .schedule-box{background:color-mix(in oklch,var(--purple) 8%,var(--surface2));border:1px solid color-mix(in oklch,var(--purple) 25%,transparent);border-radius:var(--radius-sm);padding:12px 14px;margin-top:8px}
 .schedule-box .sch-title{font-size:12px;font-weight:600;color:var(--purple);margin-bottom:8px}
+
+/* ── BLACKLIST ────────────────────────────────*/
+.bl-add-row{display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap}
+.bl-add-row input{flex:1;min-width:200px}
+.bl-count{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
 </style>
 </head>
 <body>
@@ -177,7 +180,8 @@ tr:hover td{background:var(--surface2)}
     <button class="nav-item" onclick="switchAccount(2);showPage('queue',this)">📋 Queue <span class="account-badge badge-a2">N°2</span></button>
     <button class="nav-item" onclick="switchAccount(2);showPage('connection',this)">📱 Connexion <span class="account-badge badge-a2" id="conn-badge-2">N°2</span></button>
 
-    <div class="nav-section">Autre</div>
+    <div class="nav-section">Outils</div>
+    <button class="nav-item" onclick="showPage('blacklist',this)">🚫 Blacklist</button>
     <button class="nav-item" onclick="showPage('overview',this)">👁 Vue d'ensemble</button>
     <button class="nav-item" onclick="showPage('settings',this)">⚙️ Paramètres</button>
     <button class="nav-item" onclick="switchAccount(1);showPage('groups',this)">👥 Groupes</button>
@@ -318,7 +322,6 @@ tr:hover td{background:var(--surface2)}
         <div class="card-title">Fichiers CSV</div>
         <p style="color:var(--muted);font-size:12px;margin-bottom:12px">Colonnes : <strong>telephone</strong> (requis) · <strong>prenom</strong>, <strong>nom</strong>, <strong>message</strong>, <strong>link</strong> (optionnel)</p>
 
-        <!-- Multi-CSV merge mode -->
         <div class="merge-mode-box" id="merge-info" style="display:none">
           ℹ️ <span id="merge-info-text">Mode fusion activé — les doublons seront ignorés automatiquement.</span>
         </div>
@@ -348,7 +351,6 @@ tr:hover td{background:var(--surface2)}
         </div>
       </div>
 
-      <!-- Toolbar -->
       <div class="card" style="padding:14px 18px">
         <div class="queue-toolbar">
           <input type="text" id="queue-search" placeholder="🔍 Rechercher un numéro ou prénom..." oninput="filterQueue()" style="max-width:260px">
@@ -371,6 +373,53 @@ tr:hover td{background:var(--surface2)}
           </table>
         </div>
         <div id="queue-pagination" style="display:flex;gap:8px;justify-content:center;margin-top:14px"></div>
+      </div>
+    </div>
+
+    <!-- ─── BLACKLIST ────────────────────────────────── -->
+    <div class="page" id="page-blacklist">
+      <div class="page-header">
+        <h1 class="page-title">🚫 Blacklist</h1>
+        <button class="btn btn-ghost" onclick="loadBlacklist()">Actualiser</button>
+      </div>
+
+      <!-- Ajouter un numéro -->
+      <div class="card">
+        <div class="card-title">Ajouter un numéro</div>
+        <div class="bl-add-row">
+          <input type="text" id="bl-phone-input" placeholder="Ex : 33612345678 (sans +)" onkeydown="if(event.key==='Enter')addToBlacklist()">
+          <button class="btn btn-primary" onclick="addToBlacklist()">➕ Ajouter</button>
+        </div>
+        <div id="bl-add-result" style="margin-top:8px;font-size:12px"></div>
+      </div>
+
+      <!-- Importer CSV -->
+      <div class="card">
+        <div class="card-title">Importer une liste CSV</div>
+        <p style="color:var(--muted);font-size:12px;margin-bottom:12px">Le fichier doit contenir une colonne <strong>telephone</strong> (ou un numéro par ligne).</p>
+        <label class="dropzone" for="bl-csv-input" id="bl-drop-zone" ondragover="blHandleDragOver(event)" ondrop="blHandleDrop(event)">
+          <input type="file" id="bl-csv-input" accept=".csv" onchange="importBlacklistCSV(this.files[0])">
+          <div id="bl-dropzone-text">📄 Glissez un CSV ici, ou cliquez</div>
+        </label>
+        <div id="bl-import-result" style="margin-top:10px;font-size:13px"></div>
+      </div>
+
+      <!-- Liste -->
+      <div class="card">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+          <div class="card-title" style="margin-bottom:0">Numéros blacklistés</div>
+          <span class="bl-count" id="bl-count">0 numéro</span>
+        </div>
+        <div style="margin-bottom:10px">
+          <input type="text" id="bl-search" placeholder="🔍 Rechercher un numéro..." oninput="renderBlacklist()" style="max-width:280px;padding:7px 11px">
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Numéro</th><th>Ajouté le</th><th style="width:60px">Action</th></tr></thead>
+            <tbody id="bl-table"><tr><td colspan="3" style="color:var(--muted);text-align:center;padding:24px">Cliquez sur Actualiser</td></tr></tbody>
+          </table>
+        </div>
+        <div id="bl-pagination" style="display:flex;gap:8px;justify-content:center;margin-top:14px"></div>
       </div>
     </div>
 
@@ -474,6 +523,10 @@ let notifEnabled = Notification.permission === 'granted';
 let prevRunning = {1:false,2:false};
 let prevLimitReached = {1:false,2:false};
 let notifBannerTimer = null;
+// Blacklist state
+let blData = [];
+let blPage = 1;
+const BL_PER_PAGE = 50;
 
 /* ═══════════════════════════════════════════════════
    THEME TOGGLE
@@ -533,9 +586,7 @@ function showNotifBanner(icon, title, body) {
 function closeNotifBanner() { document.getElementById('notif-banner').classList.remove('show'); }
 
 function fireNotification(title, body, icon='') {
-  // In-app banner always
   showNotifBanner(icon||'🔔', title, body);
-  // Native notification if allowed & page hidden
   if (notifEnabled && Notification.permission === 'granted' && document.hidden) {
     new Notification(title, { body, icon: '/favicon.ico', badge: '/favicon.ico' });
   }
@@ -559,6 +610,7 @@ function showPage(name, el) {
   if (name==='groups')     loadGroups();
   if (name==='overview')   renderOverview();
   if (name==='settings')   { loadSettings(); updateNotifUI(); }
+  if (name==='blacklist')  loadBlacklist();
 }
 
 /* ═══════════════════════════════════════════════════
@@ -594,7 +646,6 @@ function applyStatus(r) {
   const prev = lastStatus[acct] || {};
   lastStatus[acct] = r;
 
-  // ── Notifications on state change ──
   if (prev.running && !r.running && !r.paused && r.pending === 0 && r.total > 0) {
     fireNotification('✅ Queue terminée', `Compte ${acct} — ${r.stats.sent} messages envoyés.`, '✅');
   }
@@ -602,7 +653,6 @@ function applyStatus(r) {
     fireNotification('⛔ Quota atteint', `Compte ${acct} — ${r.dailySent}/${r.dailyLimit} msgs. Reprise dans ${formatCountdown(r.resetInMs)}.`, '⛔');
   }
 
-  // Only update dashboard if active
   if (!document.getElementById('page-dashboard').classList.contains('active')) return;
 
   document.getElementById('stat-sent').textContent    = r.stats.sent;
@@ -818,7 +868,6 @@ function renderQueue() {
     }).join('');
   }
 
-  // Pagination
   const pg = document.getElementById('queue-pagination');
   if (pages <= 1) { pg.innerHTML=''; return; }
   let html='';
@@ -836,6 +885,108 @@ function exportQueueFiltered() {
 }
 
 /* ═══════════════════════════════════════════════════
+   BLACKLIST
+═══════════════════════════════════════════════════ */
+async function loadBlacklist() {
+  document.getElementById('bl-table').innerHTML = '<tr><td colspan="3" style="color:var(--muted);text-align:center;padding:24px">⏳ Chargement...</td></tr>';
+  try {
+    const r = await fetch('/api/blacklist').then(r=>r.json());
+    blData = Array.isArray(r) ? r : (r.numbers||r.items||[]);
+    blPage = 1;
+    renderBlacklist();
+  } catch(e) {
+    document.getElementById('bl-table').innerHTML = '<tr><td colspan="3" style="color:var(--red);text-align:center;padding:20px">Erreur de chargement</td></tr>';
+  }
+}
+
+function renderBlacklist() {
+  const search = (document.getElementById('bl-search').value||'').toLowerCase();
+  let filtered = blData;
+  if (search) filtered = filtered.filter(e => String(e.phone||e.number||e).includes(search));
+
+  const total = filtered.length;
+  document.getElementById('bl-count').textContent = `${total} numéro${total>1?'s':''}`;
+
+  const pages = Math.ceil(total/BL_PER_PAGE)||1;
+  if (blPage > pages) blPage = pages;
+  const page = filtered.slice((blPage-1)*BL_PER_PAGE, blPage*BL_PER_PAGE);
+
+  const tbody = document.getElementById('bl-table');
+  if (!page.length) {
+    tbody.innerHTML = `<tr><td colspan="3"><div class="empty-state"><div style="font-size:32px">🚫</div><p>${search?'Aucun résultat pour cette recherche.':'La blacklist est vide.'}</p></div></td></tr>`;
+  } else {
+    tbody.innerHTML = page.map(e => {
+      const phone = e.phone||e.number||e;
+      const addedAt = e.addedAt ? new Date(e.addedAt).toLocaleString('fr-FR') : '—';
+      return `<tr>
+        <td style="font-family:monospace;font-size:12px">${phone}</td>
+        <td style="font-size:11px;color:var(--muted)">${addedAt}</td>
+        <td><button class="btn btn-danger" style="padding:4px 10px;font-size:11px" onclick="removeFromBlacklist('${phone}')">🗑 Retirer</button></td>
+      </tr>`;
+    }).join('');
+  }
+
+  const pg = document.getElementById('bl-pagination');
+  if (pages <= 1) { pg.innerHTML=''; return; }
+  let html='';
+  if (blPage>1) html+=`<button class="btn btn-ghost" style="padding:5px 10px;font-size:12px" onclick="goBlPage(${blPage-1})">← Préc</button>`;
+  html+=`<span style="font-size:12px;color:var(--muted);align-self:center">Page ${blPage} / ${pages}</span>`;
+  if (blPage<pages) html+=`<button class="btn btn-ghost" style="padding:5px 10px;font-size:12px" onclick="goBlPage(${blPage+1})">Suiv →</button>`;
+  pg.innerHTML=html;
+}
+
+function goBlPage(n) { blPage=n; renderBlacklist(); }
+
+async function addToBlacklist() {
+  const input = document.getElementById('bl-phone-input');
+  const phone = input.value.trim().replace(/\s+/g,'').replace(/^\+/,'');
+  const res = document.getElementById('bl-add-result');
+  if (!phone) { res.innerHTML='<span class="badge badge-red">⚠️ Entrez un numéro</span>'; return; }
+  res.innerHTML='<span style="color:var(--muted)">⏳...</span>';
+  try {
+    const r = await fetch('/api/blacklist/add',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phone})}).then(r=>r.json());
+    if (r.ok||r.added||r.success) {
+      res.innerHTML='<span class="badge badge-green">✓ Ajouté</span>';
+      input.value='';
+      await loadBlacklist();
+    } else {
+      res.innerHTML=`<span class="badge badge-yellow">⚠️ ${r.error||r.message||'Déjà présent ou erreur'}</span>`;
+    }
+  } catch(e) { res.innerHTML='<span class="badge badge-red">Erreur réseau</span>'; }
+}
+
+async function removeFromBlacklist(phone) {
+  if (!confirm(`Retirer ${phone} de la blacklist ?`)) return;
+  try {
+    await fetch('/api/blacklist/remove',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phone})});
+    blData = blData.filter(e=>(e.phone||e.number||e)!==phone);
+    renderBlacklist();
+  } catch(e) { alert('Erreur lors de la suppression'); }
+}
+
+function blHandleDragOver(e) { e.preventDefault(); document.getElementById('bl-drop-zone').style.borderColor='var(--primary)'; }
+function blHandleDrop(e) { e.preventDefault(); document.getElementById('bl-drop-zone').style.borderColor=''; const f=e.dataTransfer.files[0]; if(f) importBlacklistCSV(f); }
+
+async function importBlacklistCSV(file) {
+  if (!file) return;
+  document.getElementById('bl-dropzone-text').textContent = `⏳ Import de ${file.name}...`;
+  const res = document.getElementById('bl-import-result');
+  res.innerHTML='<span style="color:var(--muted)">⏳ Import en cours...</span>';
+  try {
+    const fd = new FormData(); fd.append('file', file);
+    const r = await fetch('/api/blacklist/import',{method:'POST',body:fd}).then(r=>r.json());
+    if (r.ok||r.added!==undefined) {
+      res.innerHTML=`<span class="badge badge-green">✓ ${r.added||0} numéros ajoutés${r.skipped?` · ${r.skipped} doublons ignorés`:''}</span>`;
+      await loadBlacklist();
+    } else {
+      res.innerHTML=`<span class="badge badge-red">Erreur : ${r.error||'inconnue'}</span>`;
+    }
+  } catch(e) { res.innerHTML='<span class="badge badge-red">Erreur réseau</span>'; }
+  document.getElementById('bl-dropzone-text').textContent='📄 Glissez un CSV ici, ou cliquez';
+  document.getElementById('bl-csv-input').value='';
+}
+
+/* ═══════════════════════════════════════════════════
    MULTI-CSV IMPORT
 ═══════════════════════════════════════════════════ */
 function handleDragOver(e) { e.preventDefault(); document.getElementById('drop-zone').style.borderColor='var(--primary)'; }
@@ -846,7 +997,7 @@ function handleCSVFiles(files) { addCSVFiles(files); }
 function addCSVFiles(files) {
   for (const f of files) {
     if (!f.name.endsWith('.csv')) continue;
-    if (pendingCSVFiles.find(x=>x.name===f.name)) continue; // skip dupe filename
+    if (pendingCSVFiles.find(x=>x.name===f.name)) continue;
     pendingCSVFiles.push(f);
   }
   renderCSVFileList();
@@ -921,7 +1072,6 @@ function updatePreview() {
   const link = document.getElementById('import-link').value.trim();
   document.getElementById('msg-count').textContent = msg.length+' caractères';
   const p = document.getElementById('msg-preview');
-  // Show preview with {prénom} replaced by a sample
   const preview = msg.replace(/\{prénom\}/gi,'Marie').replace(/\{nom\}/gi,'Dupont').replace(/\{prenom\}/gi,'Marie');
   if (msg.trim()) { p.style.color='var(--text)'; p.textContent=preview; }
   else { p.style.color='var(--muted)'; p.textContent='Votre message apparaîtra ici...'; }
@@ -1003,7 +1153,6 @@ async function loadGroups() {
    INIT
 ═══════════════════════════════════════════════════ */
 updateNotifUI();
-// Default datetime = tomorrow 09:00
 (function(){
   const dt = document.getElementById('schedule-dt');
   const d = new Date(); d.setDate(d.getDate()+1); d.setHours(9,0,0,0);
