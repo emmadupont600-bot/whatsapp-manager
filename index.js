@@ -13,6 +13,37 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 const upload = multer({ dest: 'uploads/' });
 
+// FIX #9 : nettoyage automatique du dossier uploads/.
+// Avant : les fichiers uploadés temporairement (CSV imports) restaient sur le
+// disque indéfiniment en cas de bug ou de crash survenu avant fs.unlinkSync.
+// Désormais :
+//   - cleanUploadsDir() supprime tous les fichiers de plus de MAX_AGE_MS (1h)
+//     au démarrage du serveur et toutes les heures via setInterval.
+//   - Tout fichier laissé par un crash ou une erreur non gérée sera purgé au
+//     plus tard 1 heure après sa création.
+const UPLOADS_DIR  = path.join(__dirname, 'uploads');
+const MAX_AGE_MS   = 60 * 60 * 1000; // 1 heure
+
+function cleanUploadsDir() {
+  if (!fs.existsSync(UPLOADS_DIR)) return;
+  const now = Date.now();
+  let removed = 0;
+  try {
+    for (const name of fs.readdirSync(UPLOADS_DIR)) {
+      const file = path.join(UPLOADS_DIR, name);
+      try {
+        const { mtimeMs } = fs.statSync(file);
+        if (now - mtimeMs > MAX_AGE_MS) { fs.unlinkSync(file); removed++; }
+      } catch (_) {}
+    }
+    if (removed > 0) console.log(`[UPLOADS] 🧹 ${removed} fichier(s) temporaire(s) supprimé(s)`);
+  } catch (_) {}
+}
+
+// Nettoyage immédiat au démarrage, puis toutes les heures
+cleanUploadsDir();
+setInterval(cleanUploadsDir, MAX_AGE_MS);
+
 // ─── Blacklist ───────────────────────────────────────────────────────────────
 const BLACKLIST_FILE = path.join(__dirname, 'data', 'blacklist.json');
 function loadBlacklist() {
@@ -620,15 +651,10 @@ class BotAccount {
 const bots={1:new BotAccount(1),2:new BotAccount(2)};
 
 // FIX #7 : getBot() ne fait plus de fallback silencieux sur bots[1].
-// Avant : bots[id] || bots[1] retournait bots[1] pour tout ID inconnu (ex: 3,
-// 99, "abc"), sans avertissement. Le client opérait alors sur le mauvais compte
-// sans le savoir. Désormais, un ID invalide renvoie null, et chaque handler de
-// route vérifie explicitement via requireBot() qui répond 404 si besoin.
 function getBot(req) {
   const id = parseInt(req.params.account || req.query.account || '');
   return (!isNaN(id) && bots[id]) ? bots[id] : null;
 }
-// Middleware : résout le bot ou répond 404 immédiatement.
 function requireBot(req, res) {
   const bot = getBot(req);
   if (!bot) {
@@ -659,7 +685,6 @@ app.post('/api/:account/set-limit', (req,res)=>{
   res.json({ok:true,limit});
 });
 
-// FIX #6 : validation robuste de scheduledAt via parseScheduledAt().
 app.post('/api/:account/schedule', (req,res)=>{
   const b=requireBot(req,res); if(!b) return;
   const{scheduledAt}=req.body;
@@ -829,7 +854,6 @@ app.get('/api/:account/export-group/:name',async(req,res)=>{
 });
 
 // Compat bot 1
-// FIX #4 : la route legacy /api/start ne vérifiait pas si le bot était connecté
 app.get('/api/status',(req,res)=>res.json(bots[1].getStatus()));
 app.post('/api/start',(req,res)=>{
   if(!bots[1].state.ready) return res.status(400).json({ok:false,error:'Non connecté'});
