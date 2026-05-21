@@ -520,12 +520,121 @@ async function verifyMessageInChat(chat, text, msgId, label, opts = {}) {
   return true;
 }
 
+
+function normalizeOutboundChatId(_chatId, phoneDigits) {
+  return phoneToCusChatId(phoneDigits);
+}
+
+function phoneHadSuccessfulSend(phone) {
+  const entry = getHistoryEntry(phone);
+  return !!(entry && entry.contacts && entry.contacts.length > 0);
+}
+
+function shouldUseManualOpener(phoneDigits, isColdContact) {
+  if (process.env.COLD_OPENER_MESSAGE === '0') return false;
+  if (process.env.OPENER_ALWAYS === '1') return true;
+  if (isColdContact) return true;
+  if (!phoneHadSuccessfulSend(phoneDigits)) return true;
+  return false;
+}
+
+function useManualRouteSplit() {
+  return process.env.MANUAL_ROUTE_SPLIT !== '0';
+}
+
 function phoneToCusChatId(number) {
   const pn = String(number).replace(/\D/g, '');
   if (!pn || pn.length < 8) throw new Error(`Numéro invalide : ${number}`);
   return `${pn}@c.us`;
 }
 
+
+
+async function openChatViaSearchUI(client, phoneDigits, logger) {
+  const page = client.pupPage;
+  if (!page) return false;
+  const phone = String(phoneDigits).replace(/\D/g, '');
+  const query = phone.length >= 10 && !phone.startsWith('+') ? `+${phone}` : `+${phone}`;
+
+  const selectors = [
+    'div[contenteditable="true"][data-tab="3"]',
+    '#side div[contenteditable="true"][role="textbox"]',
+    'div[aria-label*="Search" i][contenteditable="true"]',
+    'div[aria-label*="Recherch" i][contenteditable="true"]',
+    'div[title*="Search" i][contenteditable="true"]',
+  ];
+
+  for (const sel of selectors) {
+    try {
+      const el = await page.$(sel);
+      if (!el) continue;
+      await el.click({ clickCount: 3 });
+      await page.keyboard.press('Backspace');
+      await page.keyboard.type(query, { delay: 40 });
+      await sleep(2000);
+      const clicked = await page.evaluate((q) => {
+        const norm = (s) => (s || '').replace(/\D/g, '');
+        const qn = norm(q);
+        const tryClick = (el) => {
+          if (!el) return false;
+          el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+          el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+          el.click();
+          return true;
+        };
+        for (const el of document.querySelectorAll('div[role="button"], button, span')) {
+          const t = (el.textContent || '').trim();
+          if (/^(discuter|message|discuss|chat)$/i.test(t) || /discuter avec/i.test(t)) {
+            if (tryClick(el)) return 'discuss_btn';
+          }
+        }
+        for (const row of document.querySelectorAll('[data-testid="cell-frame-container"], div[role="listitem"]')) {
+          const txt = norm(row.textContent || '');
+          if (txt.includes(qn) || txt.includes(qn.slice(-9))) {
+            if (tryClick(row)) return 'search_row';
+          }
+        }
+        return null;
+      }, query);
+      if (clicked) {
+        if (logger) logger(`🔍 Chat ouvert via recherche WhatsApp (${clicked})`, 'info');
+        await sleep(1200);
+        return true;
+      }
+    } catch (e) {
+      if (logger) logger(`⚠️ Recherche UI (${sel}) : ${e.message}`, 'warn');
+    }
+  }
+
+  try {
+    const ok = await withTimeout(page.evaluate(async (q) => {
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      const paste = (el, text) => {
+        el.focus();
+        const dt = new DataTransfer();
+        dt.setData('text', text);
+        el.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true }));
+      };
+      let input = document.querySelector('div[contenteditable="true"][data-tab="3"]')
+        || document.querySelector('#side div[contenteditable="true"][role="textbox"]');
+      if (!input) return { ok: false, err: 'no_input' };
+      paste(input, q);
+      await sleep(2200);
+      const nodes = [...document.querySelectorAll('[data-testid="cell-frame-container"], div[role="listitem"]')];
+      if (nodes[0]) { nodes[0].click(); await sleep(600); return { ok: true, via: 'paste_row' }; }
+      return { ok: false, err: 'no_row' };
+    }, query), 20000, 'searchUI paste');
+    if (ok.ok) {
+      if (logger) logger(`🔍 Chat ouvert via collage recherche (${ok.via})`, 'info');
+      await sleep(1000);
+      return true;
+    }
+    if (logger) logger(`⚠️ Recherche UI collage : ${ok.err}`, 'warn');
+  } catch (e) {
+    if (logger) logger(`⚠️ Recherche UI collage : ${e.message}`, 'warn');
+  }
+  return false;
+}
 
 async function prepareOutboundChat(client, phoneDigits, logger) {
   const cusId = phoneToCusChatId(phoneDigits);
@@ -649,7 +758,10 @@ async function prepareOutboundChat(client, phoneDigits, logger) {
   );
 
   if (prep && prep.ok) {
-    chatId = prep.chatId || cusId;
+    if (prep.chatId && prep.chatId.includes('@lid') && logger) {
+      logger(`ℹ️ Chat interne LID détecté — envoi forcé via ${cusId}`, 'info');
+    }
+    chatId = cusId;
     isColdContact = !!prep.isCold;
     isKnownContact = !!(prep.isMyContact || prep.hasWaHistory);
     if (prep.manualOpened && logger) logger(`🔍 Chat ouvert (flux recherche / Discuter) pour +${phoneDigits}`, 'info');
@@ -669,12 +781,17 @@ async function prepareOutboundChat(client, phoneDigits, logger) {
     try { chat = await getChat(client, cusId, logger); } catch (_) {}
   }
 
+  if (process.env.MANUAL_SEARCH_DOM !== '0') {
+    await openChatViaSearchUI(client, phoneDigits, logger);
+  }
+
   if (isColdContact) {
     const coldMs = parseInt(process.env.COLD_CONTACT_DELAY_MS || '15000', 10);
     if (logger) logger(`⏳ Délai nouveau contact : ${(coldMs / 1000).toFixed(0)}s`, 'info');
     await sleep(coldMs);
   }
 
+  chatId = cusId;
   return { chatId, chat, isColdContact, isKnownContact };
 }
 
@@ -760,9 +877,7 @@ async function sendAndVerify(client, chatId, text, label, logger, chatForTyping 
   if (!useChatObject && (sendChatId.includes('@lid') || !sendChatId.includes('@'))) {
     sendChatId = phoneToCusChatId(phoneDigits || chatId);
   }
-  if (useChatObject && chatForTyping.id?._serialized) {
-    sendChatId = chatForTyping.id._serialized;
-  }
+  sendChatId = normalizeOutboundChatId(sendChatId, phoneDigits || chatId);
   if (chatForTyping) {
     try {
       await chatForTyping.sendStateTyping();
@@ -1221,7 +1336,7 @@ class BotAccount {
         this.log(`⚠️ getChatById pour typing : ${e.message}`, 'warn');
       }
     }
-    const ackSoft = !!(opts.coldContact && useAckColdSoft());
+    const ackSoft = !!((opts.coldContact || opts.manualOpener) && useAckColdSoft());
     const doSend = async (text, label, useTypingChat) => {
       const pn = chatId.split('@')[0].replace(/\D/g, '');
       const result = await sendAndVerify(this.client, chatId, text, label, this.log.bind(this), useTypingChat, pn, { ackSoft });
@@ -1268,6 +1383,7 @@ class BotAccount {
   async _deliverToNumber(number, contact, { message, link, skipProbe = false } = {}) {
     await resolveOutboundChatId(this.client, number, this.log.bind(this));
     const { chatId, chat: prefetchedChat, isColdContact } = await prepareOutboundChat(this.client, number, this.log.bind(this));
+    const cusChatId = normalizeOutboundChatId(chatId, number);
     if (!skipProbe) {
       try {
         await probeWhatsAppConnection(this.client, this.log.bind(this), { strict: false });
@@ -1275,7 +1391,7 @@ class BotAccount {
         this.log(`⚠️ ${e.message}`, 'warn');
       }
     }
-    if (!await safeIsRegisteredUser(this.client, chatId, this.log.bind(this))) {
+    if (!await safeIsRegisteredUser(this.client, cusChatId, this.log.bind(this))) {
       throw new Error(`+${number} n'est pas sur WhatsApp`);
     }
     const rawMsgBase = personalizeMessage(
@@ -1287,9 +1403,12 @@ class BotAccount {
     if (combined && linkBase) {
       this.log('📨 Envoi en 1 message (texte + lien combinés)', 'info');
     }
+    const useOpener = shouldUseManualOpener(number, isColdContact);
+    const openerText = useOpener ? getColdOpenerText() : '';
+    const splitRoute = useManualRouteSplit() && combined && !!(linkBase && linkBase.trim());
     let msgCount = countOutboundMessages(rawMsg, personalizedLink);
-    const openerForQuota = isColdContact ? getColdOpenerText() : '';
-    if (openerForQuota) msgCount += 1;
+    if (openerText) msgCount += 1;
+    if (splitRoute) msgCount += 1;
     if (msgCount === 0) throw new Error('Message vide');
     if (msgCount > this._messagesAvailable()) {
       throw new Error(`Quota insuffisant : ${msgCount} message(s) requis, ${this._messagesAvailable()} restant(s) sur ${this.dailyLimit}`);
@@ -1297,28 +1416,54 @@ class BotAccount {
     if (!(await this._waitForHourlyCapacity(msgCount))) {
       throw new Error('Envoi annulé : limite horaire');
     }
-    const opener = isColdContact ? getColdOpenerText() : '';
-    if (opener) {
-      this.log(`👋 Étape 1 (comme manuel) : "${opener}" puis message campagne`, 'info');
+    if (useOpener && openerText) {
+      this.log(`👋 Étape 1 (comme manuel) : "${openerText}" puis campagne`, 'info');
       await sleep(rand(400, 1200));
+    } else if (combined) {
+      this.log('📨 Envoi direct (déjà contacté avec succès avant)', 'info');
     }
     this._recordFirstSend();
-    const sendOpts = { coldContact: isColdContact };
+    const sendOpts = { coldContact: isColdContact || useOpener, manualOpener: useOpener };
     let result;
-    if (opener) {
-      const openerResult = await this._sendMessage(chatId, opener, '', prefetchedChat, sendOpts);
+    const sendId = cusChatId;
+    if (openerText) {
+      const openerResult = await this._sendMessage(sendId, openerText, '', prefetchedChat, sendOpts);
       await sleep(COLD_OPENER_DELAY_MS);
-      const mainResult = await this._sendMessage(chatId, rawMsg, personalizedLink, prefetchedChat, sendOpts);
+      if (splitRoute) {
+        const textOnly = personalizeMessage((message ?? contact.message ?? '').trim() || process.env.DEFAULT_MESSAGE || '', contact);
+        const linkOnly = personalizeMessage((link ?? contact.link ?? '').trim(), contact);
+        const textResult = await this._sendMessage(sendId, textOnly, '', prefetchedChat, sendOpts);
+        await sleep(rand(config.linkDelayMin, config.linkDelayMax));
+        const linkResult = await this._sendMessage(sendId, linkOnly, '', prefetchedChat, sendOpts);
+        result = {
+          messageCount: openerResult.messageCount + textResult.messageCount + linkResult.messageCount,
+          ids: [...(openerResult.ids || []), ...(textResult.ids || []), ...(linkResult.ids || [])],
+          lastId: linkResult.lastId
+        };
+      } else {
+        const mainResult = await this._sendMessage(sendId, rawMsg, personalizedLink, prefetchedChat, sendOpts);
+        result = {
+          messageCount: openerResult.messageCount + mainResult.messageCount,
+          ids: [...(openerResult.ids || []), ...(mainResult.ids || [])],
+          lastId: mainResult.lastId
+        };
+      }
+    } else if (splitRoute) {
+      const textOnly = personalizeMessage((message ?? contact.message ?? '').trim() || process.env.DEFAULT_MESSAGE || '', contact);
+      const linkOnly = personalizeMessage((link ?? contact.link ?? '').trim(), contact);
+      const textResult = await this._sendMessage(sendId, textOnly, '', prefetchedChat, sendOpts);
+      await sleep(rand(config.linkDelayMin, config.linkDelayMax));
+      const linkResult = await this._sendMessage(sendId, linkOnly, '', prefetchedChat, sendOpts);
       result = {
-        messageCount: openerResult.messageCount + mainResult.messageCount,
-        ids: [...(openerResult.ids || []), ...(mainResult.ids || [])],
-        lastId: mainResult.lastId
+        messageCount: textResult.messageCount + linkResult.messageCount,
+        ids: [...(textResult.ids || []), ...(linkResult.ids || [])],
+        lastId: linkResult.lastId
       };
     } else {
-      result = await this._sendMessage(chatId, rawMsg, personalizedLink, prefetchedChat, sendOpts);
+      result = await this._sendMessage(sendId, rawMsg, personalizedLink, prefetchedChat, sendOpts);
     }
     this.state.sessionHealthy = true;
-    return { chatId, number, rawMsg, personalizedLink, msgCount, result, combined, openerUsed: !!opener };
+    return { chatId: sendId, number, rawMsg, personalizedLink, msgCount, result, combined, openerUsed: !!openerText, splitRoute };
   }
 
   async sendTest(phone, message, link) {
@@ -1631,7 +1776,7 @@ app.get('/api/health', (req, res) => {
     ok: true,
     version: APP_VERSION,
     commit: BUILD_COMMIT,
-    features: { resetAuth: true, ghostDetection: true, messageAck: true, combinedLinkMessage: !useSplitLinkMessages(), coldContactSync: true, manualSearchFlow: true, coldOpener: true, ackColdSoft: true },
+    features: { resetAuth: true, ghostDetection: true, messageAck: true, combinedLinkMessage: !useSplitLinkMessages(), coldContactSync: true, manualSearchFlow: true, coldOpener: true, ackColdSoft: true, manualSearchDom: true, manualRouteSplit: true },
     resetAuthOnStart: [...RESET_AUTH_ON_START],
     uptimeSec: Math.round(process.uptime()),
   });
