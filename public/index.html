@@ -580,6 +580,205 @@ tr:hover td{background:var(--surface2)}
 </div>
 
 <script>
+
+  /* ═══════════════════════════════════════════════════
+   HISTORIQUE GLOBAL
+═══════════════════════════════════════════════════ */
+let histData = [], histFilter = 'all', histSearch = '', histPage = 1;
+const HIST_PER_PAGE = 50;
+
+async function loadHistory() {
+  document.getElementById('hist-table').innerHTML = '<tr><td colspan="7" style="color:var(--muted);text-align:center;padding:24px">⏳ Chargement...</td></tr>';
+  try {
+    const r = await fetch('/api/sent-history').then(r=>r.json());
+    histData = Array.isArray(r) ? r : (r.items||r.history||[]);
+    histPage = 1;
+    renderHistory();
+  } catch(e) {
+    document.getElementById('hist-table').innerHTML = '<tr><td colspan="7" style="color:var(--red);text-align:center;padding:20px">Erreur de chargement</td></tr>';
+  }
+}
+
+function setHistFilter(status, btn) {
+  histFilter = status; histPage = 1;
+  document.querySelectorAll('#page-history .filter-btn').forEach(b=>b.classList.remove('active'));
+  btn.classList.add('active');
+  renderHistory();
+}
+
+function renderHistory() {
+  histSearch = (document.getElementById('hist-search').value||'').toLowerCase();
+  let filtered = histData;
+  if (histFilter !== 'all') filtered = filtered.filter(c=>c.status===histFilter);
+  if (histSearch) filtered = filtered.filter(c=>
+    String(c.phone||c.telephone||'').includes(histSearch) ||
+    String(c.prenom||c.name||'').toLowerCase().includes(histSearch) ||
+    String(c.account||'').toString().includes(histSearch)
+  );
+  const total = filtered.length;
+  document.getElementById('hist-count-label').textContent = `${total} entrée${total>1?'s':''}`;
+  const pages = Math.ceil(total/HIST_PER_PAGE)||1;
+  if (histPage > pages) histPage = pages;
+  const page = filtered.slice((histPage-1)*HIST_PER_PAGE, histPage*HIST_PER_PAGE);
+
+  const tbody = document.getElementById('hist-table');
+  if (!page.length) {
+    tbody.innerHTML = `<tr><td colspan="7"><div class="empty-state"><div style="font-size:32px">🕓</div><p>Aucun résultat.</p></div></td></tr>`;
+  } else {
+    tbody.innerHTML = page.map(c => {
+      const phone   = c.phone||c.telephone||'';
+      const prenom  = c.prenom||c.name||'';
+      const acct    = c.account ? `<span class="account-badge ${c.account==2?'badge-a2':'badge-a1'}">N°${c.account}</span>` : '—';
+      const reply   = c.replyText ? `<span title="${c.replyText.replace(/"/g,'&quot;')}" style="cursor:help;color:var(--purple)">💬 ${c.replyText.substring(0,30)}${c.replyText.length>30?'…':''}</span>` : '—';
+      const sentAt  = c.sentAt ? new Date(c.sentAt).toLocaleString('fr-FR') : '—';
+      return `<tr>
+        <td style="font-family:monospace;font-size:12px">${phone}</td>
+        <td>${prenom||'—'}</td>
+        <td>${acct}</td>
+        <td>${statusBadge(c.status||'done')}</td>
+        <td style="max-width:180px">${reply}</td>
+        <td style="font-size:11px;color:var(--muted)">${sentAt}</td>
+        <td><button class="btn btn-danger" style="padding:3px 8px;font-size:11px" onclick="deleteHistEntry('${phone}','${c.account||''}')">🗑</button></td>
+      </tr>`;
+    }).join('');
+  }
+
+  const pg = document.getElementById('hist-pagination');
+  if (pages <= 1) { pg.innerHTML=''; return; }
+  let html = '';
+  if (histPage>1) html+=`<button class="btn btn-ghost" style="padding:5px 10px;font-size:12px" onclick="goHistPage(${histPage-1})">← Préc</button>`;
+  html+=`<span style="font-size:12px;color:var(--muted);align-self:center">Page ${histPage} / ${pages}</span>`;
+  if (histPage<pages) html+=`<button class="btn btn-ghost" style="padding:5px 10px;font-size:12px" onclick="goHistPage(${histPage+1})">Suiv →</button>`;
+  pg.innerHTML = html;
+}
+
+function goHistPage(n) { histPage=n; renderHistory(); }
+
+async function deleteHistEntry(phone, account) {
+  if (!confirm(`Supprimer l'entrée ${phone} de l'historique ?`)) return;
+  try {
+    await fetch('/api/sent-history', {method:'DELETE', headers:{'Content-Type':'application/json'}, body:JSON.stringify({phone, account})});
+    histData = histData.filter(c => !((c.phone||c.telephone)===phone && (!account || String(c.account)===String(account))));
+    renderHistory();
+  } catch(e) { alert('Erreur lors de la suppression'); }
+}
+
+async function purgeHistory() {
+  if (!confirm('Supprimer TOUT l\'historique global ? Cette action est irréversible.')) return;
+  try {
+    await fetch('/api/sent-history/purge', {method:'POST'});
+    histData = []; renderHistory();
+  } catch(e) { alert('Erreur lors de la purge'); }
+}
+
+/* ═══════════════════════════════════════════════════
+   STATS
+═══════════════════════════════════════════════════ */
+let statsChart = null;
+
+async function loadStats() {
+  try {
+    const r = await fetch('/api/stats').then(r=>r.json());
+    // KPIs
+    document.getElementById('s-total').textContent    = r.totalSent ?? r.total ?? '—';
+    const rate = r.deliveryRate ?? (r.totalSent && r.totalAttempts ? Math.round(r.totalSent/r.totalAttempts*100) : null);
+    document.getElementById('s-rate').textContent     = rate != null ? rate+'%' : '—';
+    document.getElementById('s-replies').textContent  = r.totalReplies ?? r.replies ?? '—';
+    document.getElementById('s-sessions').textContent = r.totalSessions ?? (r.sessions ? r.sessions.length : '—');
+
+    // Détail par compte
+    const accounts = r.accounts || r.byAccount || [];
+    const atbody = document.getElementById('stats-accounts-table');
+    if (accounts.length) {
+      atbody.innerHTML = accounts.map(a => {
+        const sent   = a.sent ?? 0;
+        const failed = a.failed ?? 0;
+        const skip   = a.skipped ?? 0;
+        const rep    = a.replies ?? 0;
+        const total  = sent + failed + skip;
+        const tRate  = total > 0 ? Math.round(sent/total*100) : 0;
+        return `<tr>
+          <td><span class="account-badge ${a.account==2?'badge-a2':'badge-a1'}" style="padding:3px 10px">N°${a.account}</span></td>
+          <td class="green">${sent}</td>
+          <td class="red">${failed}</td>
+          <td class="yellow">${skip}</td>
+          <td style="color:var(--purple)">${rep}</td>
+          <td><span class="badge ${tRate>=80?'badge-green':tRate>=50?'badge-yellow':'badge-red'}">${tRate}%</span></td>
+        </tr>`;
+      }).join('');
+    } else {
+      atbody.innerHTML = '<tr><td colspan="6" style="color:var(--muted);text-align:center;padding:16px">Pas encore de données</td></tr>';
+    }
+
+    // Graphique sessions
+    const sessions = r.sessions || [];
+    const chartWrap = document.getElementById('stats-chart-wrap');
+    const chartEmpty = document.getElementById('stats-chart-empty');
+    if (!sessions.length) { chartWrap.style.display='none'; chartEmpty.style.display='block'; return; }
+    chartWrap.style.display='block'; chartEmpty.style.display='none';
+
+    const labels = sessions.map((s,i) => s.label || s.date || `Session ${i+1}`);
+    const values = sessions.map(s => s.sent ?? s.count ?? 0);
+    const isDark = document.documentElement.getAttribute('data-theme') !== 'light';
+    const textColor = isDark ? '#888' : '#666';
+    const gridColor = isDark ? '#2e2e2e' : '#e5e5e5';
+
+    if (statsChart) statsChart.destroy();
+    const ctx = document.getElementById('stats-chart').getContext('2d');
+    statsChart = new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [{
+          label: 'Messages envoyés',
+          data: values,
+          backgroundColor: 'rgba(37,211,102,0.25)',
+          borderColor: '#25d366',
+          borderWidth: 2,
+          borderRadius: 6,
+        }]
+      },
+      options: {
+        responsive: true,
+        plugins: {
+          legend: { display: false },
+          tooltip: { callbacks: { label: ctx => ` ${ctx.parsed.y} messages` } }
+        },
+        scales: {
+          x: { ticks: { color: textColor, font:{size:11} }, grid: { color: gridColor } },
+          y: { beginAtZero: true, ticks: { color: textColor, font:{size:11}, stepSize:1 }, grid: { color: gridColor } }
+        }
+      }
+    });
+  } catch(e) {
+    console.error('Erreur stats:', e);
+  }
+}
+
+/* ═══════════════════════════════════════════════════
+   EXPORT PAR STATUT (Queue)
+═══════════════════════════════════════════════════ */
+function exportStatus(status) {
+  window.open(`/api/${currentAccount}/export?status=${status}`, '_blank');
+}
+
+/* ═══════════════════════════════════════════════════
+   NAVIGATION — mise à jour showPage
+   (ajouter ces cas dans la fonction showPage existante)
+   IMPORTANT : ne pas réécrire showPage, juste ajouter
+   ces lignes DANS le if-chain existant :
+
+   if (name==='history') loadHistory();
+   if (name==='stats')   { loadStats(); loadChartJS(); }
+
+═══════════════════════════════════════════════════ */
+function loadChartJS() {
+  if (window.Chart) return;
+  const s = document.createElement('script');
+  s.src = 'https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js';
+  s.onload = () => loadStats();
+  document.head.appendChild(s);
+}
 /* ═══════════════════════════════════════════════════
    GLOBALS
 ═══════════════════════════════════════════════════ */
@@ -688,7 +887,7 @@ function showPage(name, el) {
   if (name==='queue')      { document.getElementById('queue-title').textContent = `Queue — ${label}`; loadQueue(); }
   if (name==='groups')     loadGroups();
   if (name==='overview')   renderOverview();
-  if (name==='settings')   { loadSettings(); updateNotifUI(); }
+  if (name==='history')    loadHistory();if (name==='stats')      { if (!window.Chart) loadChartJS(); else loadStats(); }  if (name==='settings')   { loadSettings(); updateNotifUI(); }
   if (name==='blacklist')  loadBlacklist();
 }
 
