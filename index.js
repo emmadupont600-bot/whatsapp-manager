@@ -950,7 +950,9 @@ class BotAccount {
 
   async sendTest(phone, message, link) {
     if (!this.state.ready) throw new Error('WhatsApp non connecté');
-    const number=phone.replace(/\D/g,''), chatId=`${number}@c.us`;
+    const number=phone.replace(/\D/g,'');
+    const chatId=await resolveOutboundChatId(this.client, number, this.log.bind(this));
+    await probeWhatsAppConnection(this.client, this.log.bind(this));
     if (!await safeIsRegisteredUser(this.client, chatId, this.log.bind(this))) throw new Error(`+${number} n'est pas sur WhatsApp`);
     const fakeContact={phone:number,prenom:'Test',nom:'Test'};
     const pMsg = personalizeMessage(message||'Message de test 👋',fakeContact);
