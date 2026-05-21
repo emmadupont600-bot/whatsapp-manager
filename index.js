@@ -293,7 +293,9 @@ let config = {
   linkDelayMax:   parseInt(process.env.LINK_DELAY_MAX_MS || '18000'),
   maxMessagesPerHour: parseInt(process.env.MAX_MSGS_PER_HOUR || '40'),
   dailyLimit:     {},
-  autoResume:     true
+  autoResume:     true,
+  /** Afficher le quota en « contacts » (texte+lien) : limite ÷ 2 côté UI */
+  quotaAsContacts: true
 };
 const CONFIG_FILE = path.join(__dirname, 'data', 'config.json');
 if (fs.existsSync(CONFIG_FILE)) {
@@ -934,6 +936,7 @@ class BotAccount {
       sessionCount:this.state.sessionCount,
       dailySent:this.state.dailySent, dailyLimit:this.dailyLimit,
       quotaCountsMessages: true,
+      quotaAsContacts: config.quotaAsContacts !== false,
       limitReached:this.state.limitReached, limitReachedAt:this.state.limitReachedAt,
       resumeAt:this.state.resumeAt, windowStart:this.state.windowStart, resetInMs,
       autoResume:config.autoResume, bannedAt:this.state.bannedAt,
@@ -1214,6 +1217,7 @@ app.post('/api/config', (req, res) => {
   if (config.linkDelayMin    > config.linkDelayMax)    errors.push('linkDelayMin doit être ≤ linkDelayMax');
   if (errors.length > 0) return res.status(400).json({ ok: false, errors });
   if (req.body.autoResume !== undefined) config.autoResume = Boolean(req.body.autoResume);
+  if (req.body.quotaAsContacts !== undefined) config.quotaAsContacts = Boolean(req.body.quotaAsContacts);
   saveConfig();
   res.json({ ok: true, config });
 });

@@ -227,13 +227,20 @@ tr:hover td{background:var(--surface2)}
             <div class="countdown" id="quota-countdown">—</div>
           </div>
         </div>
-        <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border);display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border);display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text);font-weight:500;cursor:pointer;margin-right:4px">
+            <input type="checkbox" id="quota-as-contacts" style="width:auto" checked onchange="toggleQuotaAsContacts()">
+            Compter en contacts (texte + lien = 2 msgs)
+          </label>
+        </div>
+        <div style="margin-top:8px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
           <span style="font-size:12px;color:var(--muted)">Limite :</span>
-          <input type="number" id="limit-input" min="1" max="1000" value="300" style="max-width:80px;padding:5px 8px;text-align:center">
+          <input type="number" id="limit-input" min="1" max="500" value="150" style="max-width:80px;padding:5px 8px;text-align:center" title="En mode contacts : 150 contacts = 300 messages WhatsApp">
           <button class="btn btn-ghost" style="padding:5px 12px;font-size:12px" onclick="setLimit()">Appliquer</button>
-          <span style="font-size:11px;color:var(--muted)">messages WA / 24h · texte+lien = 2</span>
+          <span id="quota-limit-hint" style="font-size:11px;color:var(--muted)">contacts / 24h (×2 msgs WA chacun)</span>
           <span id="limit-saved" style="font-size:11px;color:var(--green);display:none">✓ Sauvegardé</span>
         </div>
+        <div id="quota-wa-equiv" style="font-size:10px;color:var(--faint);margin-top:6px"></div>
       </div>
 
       <!-- Quota alert -->
@@ -890,6 +897,68 @@ function queueEtaSeconds(r) {
   if (r.estimatedQueueSec != null && r.estimatedQueueSec > 0) return r.estimatedQueueSec;
   return (r.pending || 0) * AVG;
 }
+
+let quotaAsContacts = true;
+
+function isQuotaAsContacts() {
+  const cb = document.getElementById('quota-as-contacts');
+  return cb ? cb.checked : quotaAsContacts;
+}
+
+function waToDisplayCount(n) {
+  const v = Number(n) || 0;
+  return isQuotaAsContacts() ? Math.floor(v / 2) : v;
+}
+
+function displayToWaCount(n) {
+  const v = parseInt(n, 10) || 0;
+  return isQuotaAsContacts() ? v * 2 : v;
+}
+
+function updateQuotaLabels() {
+  const contacts = isQuotaAsContacts();
+  const title = document.querySelector('#quota-card .card-title');
+  if (title) {
+    title.textContent = contacts
+      ? 'Quota en contacts (24h) — texte + lien'
+      : 'Quota messages WhatsApp (24h glissantes)';
+  }
+  const hint = document.getElementById('quota-limit-hint');
+  if (hint) {
+    hint.textContent = contacts
+      ? 'contacts / 24h (×2 msgs WA par contact)'
+      : 'messages WA / 24h · texte+lien = 2';
+  }
+  const inp = document.getElementById('limit-input');
+  if (inp) {
+    inp.max = contacts ? 500 : 1000;
+    inp.min = 1;
+  }
+}
+
+async function loadQuotaDisplayPref() {
+  try {
+    const cfg = await fetch('/api/config').then(r => r.json());
+    quotaAsContacts = cfg.quotaAsContacts !== false;
+    const cb = document.getElementById('quota-as-contacts');
+    if (cb) cb.checked = quotaAsContacts;
+    updateQuotaLabels();
+  } catch (_) {}
+}
+
+async function toggleQuotaAsContacts() {
+  quotaAsContacts = isQuotaAsContacts();
+  updateQuotaLabels();
+  try {
+    await fetch('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ quotaAsContacts })
+    });
+  } catch (_) {}
+  const r = lastStatus[currentAccount];
+  if (r) applyStatus(r);
+}
 let currentAccount = 1;
 let lastQr = {1:null,2:null};
 let countdownInterval = null;
@@ -1133,17 +1202,37 @@ function applyStatus(r) {
   document.getElementById('stat-failed').textContent   = r.stats.failed+r.stats.skipped;
   paintStatusBadge(readyShown);
 
+  if (r.quotaAsContacts !== undefined) {
+    quotaAsContacts = r.quotaAsContacts !== false;
+    const cb = document.getElementById('quota-as-contacts');
+    if (cb) cb.checked = quotaAsContacts;
+    updateQuotaLabels();
+  }
+
   const pctQ = r.dailyLimit > 0 ? Math.min(100, Math.round(r.dailySent / r.dailyLimit * 100)) : 0;
-  document.getElementById('quota-count').textContent = `${r.dailySent} / ${r.dailyLimit} msgs WA`;
+  const dispSent = waToDisplayCount(r.dailySent);
+  const dispLimit = waToDisplayCount(r.dailyLimit);
+  const dispAvail = waToDisplayCount(r.messagesAvailable ?? Math.max(0, r.dailyLimit - r.dailySent));
+  const unit = isQuotaAsContacts() ? 'contacts' : 'msgs WA';
+  document.getElementById('quota-count').textContent = `${dispSent} / ${dispLimit} ${unit}`;
   document.getElementById('quota-pct').textContent   = pctQ + '%';
+  const equiv = document.getElementById('quota-wa-equiv');
+  if (equiv) {
+    equiv.textContent = isQuotaAsContacts()
+      ? `Équivalent WhatsApp : ${r.dailySent} / ${r.dailyLimit} messages réels · ~${dispAvail} ${unit} restant(s)`
+      : `Mode messages : chaque contact texte+lien consomme 2 unités`;
+  }
   const quotaHint = document.getElementById('quota-hourly-hint');
   if (quotaHint && r.maxMessagesPerHour) {
-    quotaHint.textContent = `Cette heure : ${r.hourlySent || 0} / ~${r.maxMessagesPerHour} · Queue : ~${r.pendingWhatsAppMessages || r.pending || 0} msgs WA${r.pendingWithDoubleMessage ? ` (${r.pendingWithDoubleMessage}×2)` : ''}`;
+    const qPending = isQuotaAsContacts()
+      ? `${r.pending || 0} contacts (~${r.pendingWhatsAppMessages || 0} msgs WA)`
+      : `~${r.pendingWhatsAppMessages || r.pending || 0} msgs WA`;
+    quotaHint.textContent = `Cette heure : ${r.hourlySent || 0} / ~${r.maxMessagesPerHour} msgs · Queue : ${qPending}`;
   }
   const bar = document.getElementById('quota-bar');
   bar.style.width = pctQ + '%';
   bar.className = 'quota-fill' + (pctQ >= 100 ? ' full' : pctQ >= 70 ? '' : ' ok');
-  document.getElementById('limit-input').value = r.dailyLimit;
+  document.getElementById('limit-input').value = dispLimit;
 
   paintQuotaBadge(pctQ);
 
@@ -1162,7 +1251,10 @@ function applyStatus(r) {
   const alertBox = document.getElementById('quota-alert');
   if (r.limitReached) {
     alertBox.style.display = 'block';
-    document.getElementById('quota-alert-msg').textContent = `${r.dailySent} messages WhatsApp envoyés — limite de ${r.dailyLimit} atteinte.`;
+    const alertUnit = isQuotaAsContacts() ? 'contacts' : 'messages WhatsApp';
+    const alertSent = isQuotaAsContacts() ? waToDisplayCount(r.dailySent) : r.dailySent;
+    const alertLimit = isQuotaAsContacts() ? waToDisplayCount(r.dailyLimit) : r.dailyLimit;
+    document.getElementById('quota-alert-msg').textContent = `${alertSent} ${alertUnit} envoyés — limite de ${alertLimit} atteinte (${r.dailySent}/${r.dailyLimit} msgs WA).`;
     const resetInfo = document.getElementById('quota-reset-info');
     if (r.resumeAt) {
       const d = new Date(r.resumeAt);
@@ -1188,7 +1280,10 @@ function applyStatus(r) {
   const etaBox=document.getElementById('eta-box'),statEta=document.getElementById('stat-eta'),etaLabel=document.getElementById('stat-eta-label');
   if (r.pending>0&&r.running&&!r.paused) {
     const sec=queueEtaSeconds(r),fin=new Date(Date.now()+sec*1000);
-    statEta.textContent=formatDuration(sec); etaLabel.textContent=`~${r.pendingWhatsAppMessages||r.pending} msgs WA`;
+    statEta.textContent=formatDuration(sec);
+    etaLabel.textContent = isQuotaAsContacts()
+      ? `~${r.pending||0} contacts`
+      : `~${r.pendingWhatsAppMessages||r.pending} msgs WA`;
     document.getElementById('eta-finish').textContent=formatTime(fin)+(fin.toDateString()===new Date().toDateString()?' auj.':' demain');
     etaBox.style.display='flex';
   } else if (r.pending>0) {
@@ -1706,8 +1801,9 @@ function updatePreview() {
   document.getElementById('msg-count').textContent = msg.length+' caractères';
   const waEl = document.getElementById('import-msg-wa-count');
   if (waEl) {
+    const contactNote = isQuotaAsContacts() && waCount >= 2 ? ' → 1 contact sur le quota' : '';
     waEl.innerHTML = waCount >= 2
-      ? '<span class="badge badge-yellow">2 messages WhatsApp par contact (texte + lien)</span>'
+      ? `<span class="badge badge-yellow">2 messages WhatsApp par contact (texte + lien)</span>${contactNote}`
       : waCount === 1
         ? '<span class="badge badge-blue">1 message WhatsApp par contact</span>'
         : '';
@@ -1728,10 +1824,20 @@ function updatePreview() {
    SETTINGS
 ═══════════════════════════════════════════════════ */
 async function setLimit() {
-  const limit = parseInt(document.getElementById('limit-input').value);
-  if (!limit || limit < 1 || limit > 1000) return alert('Entrez une valeur entre 1 et 1000');
-  const r = await fetch(`/api/${currentAccount}/set-limit`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({limit})}).then(r=>r.json());
-  if (r.ok) { const el=document.getElementById('limit-saved'); el.style.display='inline'; setTimeout(()=>el.style.display='none',2000); }
+  const displayVal = parseInt(document.getElementById('limit-input').value, 10);
+  const contacts = isQuotaAsContacts();
+  const maxDisplay = contacts ? 500 : 1000;
+  if (!displayVal || displayVal < 1 || displayVal > maxDisplay) {
+    return alert(contacts ? 'Entrez entre 1 et 500 contacts (2 à 1000 msgs WA)' : 'Entrez entre 1 et 1000');
+  }
+  const waLimit = displayToWaCount(displayVal);
+  const r = await fetch(`/api/${currentAccount}/set-limit`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({limit:waLimit})}).then(r=>r.json());
+  if (r.ok) {
+    const el=document.getElementById('limit-saved');
+    el.style.display='inline';
+    setTimeout(()=>el.style.display='none',2000);
+    fetchStatus();
+  }
 }
 
 async function loadSettings() {
@@ -1742,6 +1848,12 @@ async function loadSettings() {
     document.getElementById('set-session-size').value = cfg.sessionSize || 15;
     document.getElementById('set-max-hour').value     = cfg.maxMessagesPerHour || 40;
     document.getElementById('set-auto-resume').checked= cfg.autoResume !== false;
+    if (cfg.quotaAsContacts !== undefined) {
+      quotaAsContacts = cfg.quotaAsContacts !== false;
+      const cb = document.getElementById('quota-as-contacts');
+      if (cb) cb.checked = quotaAsContacts;
+      updateQuotaLabels();
+    }
   } catch(e){}
 }
 
@@ -1823,6 +1935,7 @@ async function loadGroups() {
    INIT
 ═══════════════════════════════════════════════════ */
 updateNotifUI();
+loadQuotaDisplayPref();
 (function(){
   const dt = document.getElementById('schedule-dt');
   const d = new Date(); d.setDate(d.getDate()+1); d.setHours(9,0,0,0);
