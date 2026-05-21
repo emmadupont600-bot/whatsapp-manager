@@ -289,8 +289,9 @@ let config = {
   sessionPauseMax:parseInt(process.env.SESSION_PAUSE_MAX || '1200'),
   typingMin:      parseInt(process.env.TYPING_MIN_MS     || '2000'),
   typingMax:      parseInt(process.env.TYPING_MAX_MS     || '6000'),
-  linkDelayMin:   parseInt(process.env.LINK_DELAY_MIN_MS || '8000'),
-  linkDelayMax:   parseInt(process.env.LINK_DELAY_MAX_MS || '15000'),
+  linkDelayMin:   parseInt(process.env.LINK_DELAY_MIN_MS || '10000'),
+  linkDelayMax:   parseInt(process.env.LINK_DELAY_MAX_MS || '18000'),
+  maxMessagesPerHour: parseInt(process.env.MAX_MSGS_PER_HOUR || '40'),
   dailyLimit:     {},
   autoResume:     true
 };
@@ -327,6 +328,17 @@ function splitMessageAndLink(msg) {
   const before = msg.slice(0, match.index).trim();
   const after  = msg.slice(match.index + url.length).trim();
   return { text: [before, after].filter(Boolean).join('\n').trim(), url };
+}
+
+/** Nombre de messages WhatsApp réellement envoyés (texte + lien séparé = 2). */
+function countOutboundMessages(rawMsg, link) {
+  const text = (rawMsg || '').trim();
+  const separateLink = !!(link && link.trim());
+  if (separateLink && text) return 2;
+  if (separateLink && !text) return 1;
+  const parts = splitMessageAndLink(text);
+  if (parts) return parts.text ? 2 : 1;
+  return text ? 1 : 0;
 }
 
 function personalizeMessage(template, contact) {
@@ -399,6 +411,7 @@ class BotAccount {
       limitReached: false, limitReachedAt: null,
       resumeAt: null, bannedAt: null,
       repliesReceived: 0,
+      sendTimestamps: [],
       log: loadLogs(id),
       stats: { sent: 0, failed: 0, skipped: 0, blacklisted: 0 }
     };
@@ -524,6 +537,55 @@ class BotAccount {
   _recordFirstSend() { if (!this.state.windowStart) this.state.windowStart = new Date().toISOString(); }
   _dailyLimitReached() { this._checkWindowReset(); return this.state.dailySent >= this.dailyLimit; }
 
+  _messagesAvailable() {
+    this._checkWindowReset();
+    return Math.max(0, this.dailyLimit - this.state.dailySent);
+  }
+
+  _pruneSendTimestamps() {
+    const cutoff = Date.now() - 3600 * 1000;
+    this.state.sendTimestamps = (this.state.sendTimestamps || []).filter(t => t > cutoff);
+  }
+
+  _recordMessagesSent(count) {
+    if (!count) return;
+    this._pruneSendTimestamps();
+    const now = Date.now();
+    for (let i = 0; i < count; i++) this.state.sendTimestamps.push(now);
+  }
+
+  _hourlyWouldExceed(additional) {
+    this._pruneSendTimestamps();
+    const max = config.maxMessagesPerHour || 40;
+    return (this.state.sendTimestamps.length + additional) > max;
+  }
+
+  async _waitForHourlyCapacity(needed) {
+    while (this._hourlyWouldExceed(needed)) {
+      if (!this.state.running) return false;
+      this.log(`⏳ Limite horaire (~${config.maxMessagesPerHour} msgs/h anti-ban) — pause 5 min`, 'warn');
+      await sleep(5 * 60 * 1000);
+      this._pruneSendTimestamps();
+    }
+    return true;
+  }
+
+  _estimateQueueSeconds() {
+    const pending = this.state.queue.filter(c => c.status === 'pending');
+    let sec = 0;
+    for (const c of pending) {
+      const rawMsg = personalizeMessage((c.message || '').trim() || process.env.DEFAULT_MESSAGE || '', c);
+      const link = personalizeMessage((c.link || '').trim(), c);
+      const mc = countOutboundMessages(rawMsg, link);
+      const base = (config.minDelay + config.maxDelay) / 2;
+      sec += mc * base;
+      if (mc >= 2) sec += (config.linkDelayMin + config.linkDelayMax) / 2000;
+    }
+    const sessions = Math.max(0, Math.floor(pending.length / Math.max(config.sessionSize, 1)));
+    sec += sessions * ((config.sessionPauseMin + config.sessionPauseMax) / 2);
+    return Math.round(sec);
+  }
+
   _detectBan(errMessage) {
     return [/rate.?limit/i,/too many/i,/spam/i,/blocked/i,/account.*banned/i,/restrict/i,/ECONNRESET/i,/WAWebDisconnected/i].some(p=>p.test(errMessage));
   }
@@ -612,18 +674,25 @@ class BotAccount {
 
   async _sendMessage(chatId, rawMsg, link) {
     const chat = await this.client.getChatById(chatId);
+    const ids = [];
     const assertSent = (msg, label) => {
       if (!msg || !msg.id || !msg.id._serialized)
         throw new Error(`sendMessage() n'a pas retourné d'accusé de réception WhatsApp (${label}). Session peut-être expirée.`);
+      ids.push(msg.id._serialized);
       return msg.id._serialized;
     };
     if (link && link.trim()) {
+      const text = (rawMsg || '').trim();
+      if (text) {
+        await this._typing(chat);
+        assertSent(await this.client.sendMessage(chatId, text), 'texte');
+        const delay = rand(config.linkDelayMin, config.linkDelayMax);
+        this.log(`⏱ Délai anti-ban avant lien : ${(delay/1000).toFixed(1)}s`, 'info');
+        await sleep(delay);
+      }
       await this._typing(chat);
-      assertSent(await this.client.sendMessage(chatId, rawMsg.trim()), 'texte');
-      const delay = rand(config.linkDelayMin, config.linkDelayMax);
-      this.log(`⏱ Délai avant lien : ${(delay/1000).toFixed(1)}s`, 'info');
-      await sleep(delay);
-      return assertSent(await this.client.sendMessage(chatId, link.trim()), 'lien');
+      assertSent(await this.client.sendMessage(chatId, link.trim()), 'lien');
+      return { messageCount: text ? 2 : 1, ids, lastId: ids[ids.length - 1] };
     }
     const parts = splitMessageAndLink(rawMsg);
     if (parts) {
@@ -631,13 +700,16 @@ class BotAccount {
         await this._typing(chat);
         assertSent(await this.client.sendMessage(chatId, parts.text), 'texte');
         await sleep(rand(config.linkDelayMin, config.linkDelayMax));
-        return assertSent(await this.client.sendMessage(chatId, parts.url), 'lien');
+        assertSent(await this.client.sendMessage(chatId, parts.url), 'lien');
+        return { messageCount: 2, ids, lastId: ids[ids.length - 1] };
       }
       await this._typing(chat);
-      return assertSent(await this.client.sendMessage(chatId, parts.url), 'url-seule');
+      assertSent(await this.client.sendMessage(chatId, parts.url), 'url-seule');
+      return { messageCount: 1, ids, lastId: ids[ids.length - 1] };
     }
     await this._typing(chat);
-    return assertSent(await this.client.sendMessage(chatId, rawMsg), 'texte-simple');
+    assertSent(await this.client.sendMessage(chatId, rawMsg), 'texte-simple');
+    return { messageCount: 1, ids, lastId: ids[ids.length - 1] };
   }
 
   async sendTest(phone, message, link) {
@@ -645,8 +717,19 @@ class BotAccount {
     const number=phone.replace(/\D/g,''), chatId=`${number}@c.us`;
     if (!await this.client.isRegisteredUser(chatId)) throw new Error(`+${number} n'est pas sur WhatsApp`);
     const fakeContact={phone:number,prenom:'Test',nom:'Test'};
-    const msgId = await this._sendMessage(chatId, personalizeMessage(message||'Message de test 👋',fakeContact), personalizeMessage(link||'',fakeContact));
-    this.log(`🧪 Message de test envoyé à +${number} [id: ${msgId}]`,'success');
+    const pMsg = personalizeMessage(message||'Message de test 👋',fakeContact);
+    const pLink = personalizeMessage(link||'',fakeContact);
+    const need = countOutboundMessages(pMsg, pLink);
+    if (need > this._messagesAvailable()) {
+      throw new Error(`Quota insuffisant : ${need} message(s) requis, ${this._messagesAvailable()} restant(s) sur ${this.dailyLimit}`);
+    }
+    if (!(await this._waitForHourlyCapacity(need))) throw new Error('Envoi annulé');
+    const result = await this._sendMessage(chatId, pMsg, pLink);
+    this.state.dailySent += result.messageCount;
+    this._recordMessagesSent(result.messageCount);
+    this._recordFirstSend();
+    this._saveQueue();
+    this.log(`🧪 Test envoyé à +${number} (${result.messageCount} msg WhatsApp) [${this.state.dailySent}/${this.dailyLimit}]`,'success');
   }
 
   async runQueue(relayBot) {
@@ -654,7 +737,7 @@ class BotAccount {
     this.state.running = true;
     this.state.limitReached = false;
     const startStats={...this.state.stats}, startTime=Date.now();
-    this.log(`🚀 Bot démarré (session ≤${config.sessionSize} msgs, limite/jour : ${this.dailyLimit})`,'success');
+    this.log(`🚀 Bot démarré (${config.sessionSize} contacts/session, quota : ${this.dailyLimit} messages WhatsApp/24h, ~${config.maxMessagesPerHour}/h)`,'success');
 
     while (this.state.queue.some(c => c.status === 'pending')) {
       // FIX : vérifier running en tête de boucle pour permettre un arrêt propre
@@ -709,14 +792,46 @@ class BotAccount {
           this.log(`⏭️ Non inscrit : +${number}`,'warn');
           this._saveQueue(); await sleep(rand(3000,8000)); continue;
         }
-        await sleep(rand(500,2000));
+        await sleep(rand(800, 2500));
         const rawMsg=personalizeMessage((contact.message||'').trim()||process.env.DEFAULT_MESSAGE||'Bonjour ! 👋',contact);
         const personalizedLink=personalizeMessage((contact.link||'').trim(),contact);
+        const msgCount = countOutboundMessages(rawMsg, personalizedLink);
+        if (msgCount === 0) {
+          contact.status='skipped'; this.state.stats.skipped++;
+          this.log(`⏭️ Message vide : +${number}`,'warn');
+          this._saveQueue(); continue;
+        }
+        if (msgCount > this._messagesAvailable()) {
+          this.state.running=false; this.state.limitReached=true; this.state.limitReachedAt=new Date().toISOString();
+          contact.status='pending';
+          const remaining=this.state.queue.filter(c=>c.status==='pending');
+          const resetIn=this._windowResetIn();
+          const relay = relayBot || this._partner;
+          this.log(`⏸ Quota : ${msgCount} msg(s) requis, ${this._messagesAvailable()} restant(s) sur ${this.dailyLimit}`,'warn');
+          if (relay && relay.state.ready && remaining.length>0) {
+            this.log(`🔁 Relais vers Compte ${relay.id} (${remaining.length} contacts)`,'warn');
+            for (const c of remaining) {
+              const cleanPhone=c.phone.replace(/\D/g,'');
+              const alreadyInRelay=relay.state.queue.some(x=>x.phone.replace(/\D/g,'')=== cleanPhone&&['pending','processing','done'].includes(x.status));
+              if (!alreadyInRelay) relay.state.queue.push({...c,status:'pending',relayedFrom:this.id,relayedAt:new Date().toISOString()});
+              else this.log(`⚠️ Doublon ignoré lors du relais : +${cleanPhone}`,'warn');
+              c.status='relayed';
+            }
+            this._saveQueue(true); relay._saveQueue(true);
+            if (!relay.state.running) relay.runQueue(this);
+          } else if (config.autoResume) this._scheduleAutoResume(relay);
+          this._saveQueue(true); break;
+        }
+        if (!(await this._waitForHourlyCapacity(msgCount))) break;
         this._recordFirstSend();
-        const msgId = await this._sendMessage(chatId,rawMsg,personalizedLink);
-        contact.status='done'; contact.sentAt=new Date().toISOString(); contact.waMessageId=msgId;
-        this.state.stats.sent++; this.state.sessionCount++; this.state.dailySent++;
-        this.log(`✅ Envoyé à +${number}${contact.prenom?' ('+contact.prenom+')':''}${contact.link?' 🔗':''} [${this.state.dailySent}/${this.dailyLimit}] id:${msgId}`,'success');
+        const result = await this._sendMessage(chatId, rawMsg, personalizedLink);
+        contact.status='done'; contact.sentAt=new Date().toISOString();
+        contact.waMessageId=result.lastId; contact.whatsappMessagesSent=result.messageCount;
+        this.state.stats.sent++; this.state.sessionCount++;
+        this.state.dailySent += result.messageCount;
+        this._recordMessagesSent(result.messageCount);
+        const linkNote = result.messageCount >= 2 ? ' (texte + lien = 2 msgs)' : '';
+        this.log(`✅ Envoyé à +${number}${contact.prenom?' ('+contact.prenom+')':''}${linkNote} [${this.state.dailySent}/${this.dailyLimit} msgs]`,'success');
         addToSentHistory(number, { sentAt: contact.sentAt, botId: this.id, message: rawMsg, link: personalizedLink, prenom: contact.prenom, nom: contact.nom });
         this._saveQueue();
         await this._delayMsg();
@@ -789,17 +904,36 @@ class BotAccount {
   getStatus() {
     this._checkWindowReset();
     const resetInMs=this._windowResetIn();
+    const pendingList = this.state.queue.filter(c => c.status === 'pending');
+    let pendingWhatsAppMessages = 0;
+    let pendingWithDoubleMessage = 0;
+    for (const c of pendingList) {
+      const mc = countOutboundMessages(
+        personalizeMessage((c.message || '').trim() || process.env.DEFAULT_MESSAGE || '', c),
+        personalizeMessage((c.link || '').trim(), c)
+      );
+      pendingWhatsAppMessages += mc;
+      if (mc >= 2) pendingWithDoubleMessage++;
+    }
+    this._pruneSendTimestamps();
     return {
       id:this.id, ready:this.state.ready, qr:this.state.qr,
       running:this.state.running, paused:this.state.paused,
       stats:this.state.stats,
-      pending:    this.state.queue.filter(c=>c.status==='pending').length,
+      pending:    pendingList.length,
+      pendingWhatsAppMessages,
+      pendingWithDoubleMessage,
+      estimatedQueueSec: this._estimateQueueSeconds(),
+      messagesAvailable: this._messagesAvailable(),
+      hourlySent: this.state.sendTimestamps.length,
+      maxMessagesPerHour: config.maxMessagesPerHour,
       relayed:    this.state.queue.filter(c=>c.status==='relayed').length,
       replied:    this.state.queue.filter(c=>c.replied===true).length,
       blacklisted:this.state.queue.filter(c=>c.status==='blacklisted').length,
       total:      this.state.queue.length,
       sessionCount:this.state.sessionCount,
       dailySent:this.state.dailySent, dailyLimit:this.dailyLimit,
+      quotaCountsMessages: true,
       limitReached:this.state.limitReached, limitReachedAt:this.state.limitReachedAt,
       resumeAt:this.state.resumeAt, windowStart:this.state.windowStart, resetInMs,
       autoResume:config.autoResume, bannedAt:this.state.bannedAt,
@@ -973,7 +1107,7 @@ app.post('/api/:account/import', upload.single('file'), (req,res)=>{
     const content=fs.readFileSync(req.file.path,'utf-8');
     const message=(req.body.message||'').trim();
     const link=(req.body.link||'').trim();
-    if(!message) return res.status(400).json({ok:false,error:'Message vide'});
+    if(!message && !link) return res.status(400).json({ok:false,error:'Message ou lien requis'});
     result=bot.importCSV(content,message,link,forceInclude);
   } catch(e){
     return res.status(400).json({ok:false,error:e.message});
@@ -1073,6 +1207,7 @@ app.post('/api/config', (req, res) => {
   setInt('typingMax',      500,   30000);
   setInt('linkDelayMin',  1000,   60000);
   setInt('linkDelayMax',  1000,   60000);
+  setInt('maxMessagesPerHour', 5, 200);
   if (config.minDelay        > config.maxDelay)        errors.push('minDelay doit être ≤ maxDelay');
   if (config.sessionPauseMin > config.sessionPauseMax) errors.push('sessionPauseMin doit être ≤ sessionPauseMax');
   if (config.typingMin       > config.typingMax)       errors.push('typingMin doit être ≤ typingMax');

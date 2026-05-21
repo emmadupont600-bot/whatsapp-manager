@@ -210,7 +210,7 @@ tr:hover td{background:var(--surface2)}
       <!-- Quota -->
       <div class="card" id="quota-card">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-          <div class="card-title" style="margin-bottom:0">Quota journalier (24h glissantes)</div>
+          <div class="card-title" style="margin-bottom:0">Quota messages WhatsApp (24h glissantes)</div>
           <div id="quota-badge"></div>
         </div>
         <div style="display:flex;align-items:center;gap:16px">
@@ -220,6 +220,7 @@ tr:hover td{background:var(--surface2)}
               <span id="quota-count">0 / 300</span>
               <span id="quota-pct">0%</span>
             </div>
+            <div id="quota-hourly-hint" style="font-size:10px;color:var(--muted);margin-top:4px"></div>
           </div>
           <div style="text-align:right;flex-shrink:0">
             <div style="font-size:11px;color:var(--muted)">Reset dans</div>
@@ -230,7 +231,7 @@ tr:hover td{background:var(--surface2)}
           <span style="font-size:12px;color:var(--muted)">Limite :</span>
           <input type="number" id="limit-input" min="1" max="1000" value="300" style="max-width:80px;padding:5px 8px;text-align:center">
           <button class="btn btn-ghost" style="padding:5px 12px;font-size:12px" onclick="setLimit()">Appliquer</button>
-          <span style="font-size:11px;color:var(--muted)">msgs / 24h par compte</span>
+          <span style="font-size:11px;color:var(--muted)">messages WA / 24h · texte+lien = 2</span>
           <span id="limit-saved" style="font-size:11px;color:var(--green);display:none">✓ Sauvegardé</span>
         </div>
       </div>
@@ -317,7 +318,8 @@ tr:hover td{background:var(--surface2)}
         <div class="form-group">
           <label>Lien à envoyer (optionnel)</label>
           <input type="url" id="import-link" placeholder="https://ton-lien.com" oninput="updatePreview()">
-          <div class="link-info" id="link-info" style="display:none">🔗 <span>Le lien sera envoyé dans un <strong>message séparé</strong>, avec délai aléatoire 8-15s.</span></div>
+          <div class="link-info" id="link-info" style="display:none">🔗 <span>Le lien part dans un <strong>2ᵉ message WhatsApp</strong> (cliquable). Compte <strong>2×</strong> sur le quota du jour. Délai aléatoire entre les deux.</span></div>
+          <div id="import-msg-wa-count" style="font-size:11px;color:var(--muted);margin-top:6px"></div>
         </div>
         <div style="font-size:12px;color:var(--muted);margin-bottom:5px">👁 Aperçu :</div>
         <div class="msg-preview" id="msg-preview" style="color:var(--muted)">Votre message apparaîtra ici...</div>
@@ -573,8 +575,12 @@ tr:hover td{background:var(--surface2)}
           </div>
         </div>
         <div class="form-group">
-          <label>Taille de session (msgs avant pause longue)</label>
+          <label>Taille de session (contacts avant pause longue)</label>
           <input type="number" id="set-session-size" min="5" max="100" value="15">
+        </div>
+        <div class="form-group">
+          <label>Plafond horaire anti-ban (messages WhatsApp / heure)</label>
+          <input type="number" id="set-max-hour" min="5" max="200" value="40">
         </div>
         <div class="form-group" style="flex-direction:row;align-items:center;gap:10px">
           <input type="checkbox" id="set-auto-resume" style="width:auto" checked>
@@ -592,9 +598,10 @@ tr:hover td{background:var(--surface2)}
       <div class="card">
         <div class="card-title">Informations quota</div>
         <div style="color:var(--muted);font-size:13px;line-height:1.8">
-          <p>📌 La limite WhatsApp fonctionne sur une <strong style="color:var(--text)">fenêtre glissante de 24h</strong>.</p>
-          <p>⏰ Le quota se remet à zéro <strong style="color:var(--text)">exactement 24h après le 1er message envoyé</strong> de la session.</p>
-          <p>🔁 Avec la reprise automatique activée, le bot reprend tout seul à ce moment.</p>
+          <p>📌 Le compteur suit les <strong style="color:var(--text)">messages WhatsApp réels</strong> (texte + lien séparé = <strong>2</strong>).</p>
+          <p>🛡️ Recommandé ~250–300 / 24h sur compte perso (non officiel). Le plafond horaire évite les pics suspects.</p>
+          <p>⏰ Reset <strong style="color:var(--text)">24h après le 1er envoi</strong> de la fenêtre en cours.</p>
+          <p>🔁 Reprise automatique possible après reset.</p>
         </div>
       </div>
     </div>
@@ -862,7 +869,27 @@ function loadChartJS() {
 /* ═══════════════════════════════════════════════════
    GLOBALS
 ═══════════════════════════════════════════════════ */
-const AVG = 82;
+const AVG = 82; // repli si l'API ne renvoie pas estimatedQueueSec
+
+function countOutboundMessagesClient(msg, link) {
+  const text = (msg || '').trim();
+  const separateLink = !!(link && link.trim());
+  if (separateLink && text) return 2;
+  if (separateLink) return 1;
+  const m = text.match(/(https?:\/\/[^\s]+)/i);
+  if (m) {
+    const before = text.slice(0, m.index).trim();
+    const after = text.slice(m.index + m[1].length).trim();
+    const hasText = !!(before || after);
+    return hasText ? 2 : 1;
+  }
+  return text ? 1 : 0;
+}
+
+function queueEtaSeconds(r) {
+  if (r.estimatedQueueSec != null && r.estimatedQueueSec > 0) return r.estimatedQueueSec;
+  return (r.pending || 0) * AVG;
+}
 let currentAccount = 1;
 let lastQr = {1:null,2:null};
 let countdownInterval = null;
@@ -1107,8 +1134,12 @@ function applyStatus(r) {
   paintStatusBadge(readyShown);
 
   const pctQ = r.dailyLimit > 0 ? Math.min(100, Math.round(r.dailySent / r.dailyLimit * 100)) : 0;
-  document.getElementById('quota-count').textContent = `${r.dailySent} / ${r.dailyLimit}`;
+  document.getElementById('quota-count').textContent = `${r.dailySent} / ${r.dailyLimit} msgs WA`;
   document.getElementById('quota-pct').textContent   = pctQ + '%';
+  const quotaHint = document.getElementById('quota-hourly-hint');
+  if (quotaHint && r.maxMessagesPerHour) {
+    quotaHint.textContent = `Cette heure : ${r.hourlySent || 0} / ~${r.maxMessagesPerHour} · Queue : ~${r.pendingWhatsAppMessages || r.pending || 0} msgs WA${r.pendingWithDoubleMessage ? ` (${r.pendingWithDoubleMessage}×2)` : ''}`;
+  }
   const bar = document.getElementById('quota-bar');
   bar.style.width = pctQ + '%';
   bar.className = 'quota-fill' + (pctQ >= 100 ? ' full' : pctQ >= 70 ? '' : ' ok');
@@ -1131,7 +1162,7 @@ function applyStatus(r) {
   const alertBox = document.getElementById('quota-alert');
   if (r.limitReached) {
     alertBox.style.display = 'block';
-    document.getElementById('quota-alert-msg').textContent = `${r.dailySent} messages envoyés — limite de ${r.dailyLimit} atteinte.`;
+    document.getElementById('quota-alert-msg').textContent = `${r.dailySent} messages WhatsApp envoyés — limite de ${r.dailyLimit} atteinte.`;
     const resetInfo = document.getElementById('quota-reset-info');
     if (r.resumeAt) {
       const d = new Date(r.resumeAt);
@@ -1156,12 +1187,12 @@ function applyStatus(r) {
 
   const etaBox=document.getElementById('eta-box'),statEta=document.getElementById('stat-eta'),etaLabel=document.getElementById('stat-eta-label');
   if (r.pending>0&&r.running&&!r.paused) {
-    const sec=r.pending*AVG,fin=new Date(Date.now()+sec*1000);
-    statEta.textContent=formatDuration(sec); etaLabel.textContent='temps restant';
+    const sec=queueEtaSeconds(r),fin=new Date(Date.now()+sec*1000);
+    statEta.textContent=formatDuration(sec); etaLabel.textContent=`~${r.pendingWhatsAppMessages||r.pending} msgs WA`;
     document.getElementById('eta-finish').textContent=formatTime(fin)+(fin.toDateString()===new Date().toDateString()?' auj.':' demain');
     etaBox.style.display='flex';
   } else if (r.pending>0) {
-    statEta.textContent=formatDuration(r.pending*AVG); etaLabel.textContent='si démarré maintenant'; etaBox.style.display='none';
+    statEta.textContent=formatDuration(queueEtaSeconds(r)); etaLabel.textContent='si démarré'; etaBox.style.display='none';
   } else {
     statEta.textContent=r.total>0?'✅':'—'; etaLabel.textContent=r.total>0?'terminé':'aucun contact'; etaBox.style.display='none';
   }
@@ -1628,7 +1659,7 @@ async function confirmDuplicatesAll() {
 async function importAllCSV() {
   const message = document.getElementById('import-message').value.trim();
   const link    = document.getElementById('import-link').value.trim();
-  if (!message) { document.getElementById('import-result').innerHTML='<span class="badge badge-red">⚠️ Écrivez un message</span>'; return; }
+  if (!message && !link) { document.getElementById('import-result').innerHTML='<span class="badge badge-red">⚠️ Message ou lien requis</span>'; return; }
   if (!pendingCSVFiles.length) return;
 
   document.getElementById('dup-confirm-box').style.display = 'none';
@@ -1671,7 +1702,16 @@ async function importAllCSV() {
 function updatePreview() {
   const msg  = document.getElementById('import-message').value;
   const link = document.getElementById('import-link').value.trim();
+  const waCount = countOutboundMessagesClient(msg, link);
   document.getElementById('msg-count').textContent = msg.length+' caractères';
+  const waEl = document.getElementById('import-msg-wa-count');
+  if (waEl) {
+    waEl.innerHTML = waCount >= 2
+      ? '<span class="badge badge-yellow">2 messages WhatsApp par contact (texte + lien)</span>'
+      : waCount === 1
+        ? '<span class="badge badge-blue">1 message WhatsApp par contact</span>'
+        : '';
+  }
   const p = document.getElementById('msg-preview');
   const preview = msg.replace(/\{prénom\}/gi,'Marie').replace(/\{nom\}/gi,'Dupont').replace(/\{prenom\}/gi,'Marie');
   if (msg.trim()) { p.style.color='var(--text)'; p.textContent=preview; }
@@ -1700,6 +1740,7 @@ async function loadSettings() {
     document.getElementById('set-min-delay').value    = cfg.minDelay   || 90;
     document.getElementById('set-max-delay').value    = cfg.maxDelay   || 180;
     document.getElementById('set-session-size').value = cfg.sessionSize || 15;
+    document.getElementById('set-max-hour').value     = cfg.maxMessagesPerHour || 40;
     document.getElementById('set-auto-resume').checked= cfg.autoResume !== false;
   } catch(e){}
 }
@@ -1709,6 +1750,7 @@ async function saveSettings() {
     minDelay:    parseInt(document.getElementById('set-min-delay').value),
     maxDelay:    parseInt(document.getElementById('set-max-delay').value),
     sessionSize: parseInt(document.getElementById('set-session-size').value),
+    maxMessagesPerHour: parseInt(document.getElementById('set-max-hour').value),
     autoResume:  document.getElementById('set-auto-resume').checked
   };
   const r = await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(r=>r.json());
