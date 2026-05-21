@@ -303,6 +303,20 @@ function whatsappMsgId(msg) {
 }
 
 const URL_RE = /(https?:\/\/[^\s]+)/i;
+function useSplitLinkMessages() {
+  return process.env.SPLIT_LINK_MESSAGE === '1';
+}
+
+/** Par défaut : 1 seul message (texte + lien), comme le test. SPLIT_LINK_MESSAGE=1 pour 2 messages séparés. */
+function prepareOutboundContent(rawMsg, link) {
+  const text = (rawMsg || '').trim();
+  const lnk = (link || '').trim();
+  if (useSplitLinkMessages()) return { rawMsg: text, link: lnk, combined: false };
+  if (lnk && text) return { rawMsg: `${text}\n\n${lnk}`, link: '', combined: true };
+  if (lnk && !text) return { rawMsg: lnk, link: '', combined: true };
+  return { rawMsg: text, link: '', combined: false };
+}
+
 function splitMessageAndLink(msg) {
   const match = msg.match(URL_RE);
   if (!match) return null;
@@ -313,10 +327,12 @@ function splitMessageAndLink(msg) {
 }
 
 function countOutboundMessages(rawMsg, link) {
-  const text = (rawMsg || '').trim();
-  const separateLink = !!(link && link.trim());
+  const { rawMsg: body, link: outLink } = prepareOutboundContent(rawMsg, link);
+  const text = (body || '').trim();
+  const separateLink = useSplitLinkMessages() && !!(outLink && outLink.trim());
   if (separateLink && text) return 2;
   if (separateLink && !text) return 1;
+  if (!useSplitLinkMessages()) return text ? 1 : 0;
   const parts = splitMessageAndLink(text);
   if (parts) return parts.text ? 2 : 1;
   return text ? 1 : 0;
@@ -1031,7 +1047,7 @@ class BotAccount {
       ids.push(result.id);
       return result.id;
     };
-    if (link && link.trim()) {
+    if (useSplitLinkMessages() && link && link.trim()) {
       const text = (rawMsg || '').trim();
       if (text) {
         await this._typing(chat);
@@ -1045,7 +1061,7 @@ class BotAccount {
       assertDistinctMessageIds(ids);
       return { messageCount: text ? 2 : 1, ids, lastId: ids[ids.length - 1] };
     }
-    const parts = splitMessageAndLink(rawMsg);
+    const parts = useSplitLinkMessages() ? splitMessageAndLink(rawMsg) : null;
     if (parts) {
       if (parts.text) {
         await this._typing(chat);
@@ -1068,21 +1084,27 @@ class BotAccount {
   /**
    * Chemin d'envoi unique : test dashboard et queue campagne utilisent exactement la même logique.
    */
-  async _deliverToNumber(number, contact, { message, link } = {}) {
+  async _deliverToNumber(number, contact, { message, link, skipProbe = false } = {}) {
     const chatId = await resolveOutboundChatId(this.client, number, this.log.bind(this));
-    try {
-      await probeWhatsAppConnection(this.client, this.log.bind(this), { strict: false });
-    } catch (e) {
-      this.log(`⚠️ ${e.message}`, 'warn');
+    if (!skipProbe) {
+      try {
+        await probeWhatsAppConnection(this.client, this.log.bind(this), { strict: false });
+      } catch (e) {
+        this.log(`⚠️ ${e.message}`, 'warn');
+      }
     }
     if (!await safeIsRegisteredUser(this.client, chatId, this.log.bind(this))) {
       throw new Error(`+${number} n'est pas sur WhatsApp`);
     }
-    const rawMsg = personalizeMessage(
+    const rawMsgBase = personalizeMessage(
       (message ?? contact.message ?? '').trim() || process.env.DEFAULT_MESSAGE || 'Bonjour ! 👋',
       contact
     );
-    const personalizedLink = personalizeMessage((link ?? contact.link ?? '').trim(), contact);
+    const linkBase = personalizeMessage((link ?? contact.link ?? '').trim(), contact);
+    const { rawMsg, link: personalizedLink, combined } = prepareOutboundContent(rawMsgBase, linkBase);
+    if (combined && linkBase) {
+      this.log('📨 Envoi en 1 message (texte + lien combinés)', 'info');
+    }
     const msgCount = countOutboundMessages(rawMsg, personalizedLink);
     if (msgCount === 0) throw new Error('Message vide');
     if (msgCount > this._messagesAvailable()) {
@@ -1094,7 +1116,7 @@ class BotAccount {
     this._recordFirstSend();
     const result = await this._sendMessage(chatId, rawMsg, personalizedLink);
     this.state.sessionHealthy = true;
-    return { chatId, number, rawMsg, personalizedLink, msgCount, result };
+    return { chatId, number, rawMsg, personalizedLink, msgCount, result, combined };
   }
 
   async sendTest(phone, message, link) {
@@ -1126,6 +1148,15 @@ class BotAccount {
     const startStats={...this.state.stats}, startTime=Date.now();
     let notReadyTicks = 0;
     this.log(`🚀 Démarrage : ${pendingCount} contact(s) · quota ${this.state.dailySent}/${this.dailyLimit} msgs WA`,'success');
+    if (!useSplitLinkMessages()) {
+      this.log('📨 Mode campagne : 1 message WhatsApp par contact (texte + lien combinés)', 'info');
+    }
+    try {
+      await probeWhatsAppConnection(this.client, this.log.bind(this), { strict: false });
+      this.state.sessionHealthy = true;
+    } catch (e) {
+      this.log(`⚠️ Probe session : ${e.message}`, 'warn');
+    }
 
     try {
       while (this.state.queue.some(c => c.status === 'pending')) {
@@ -1179,7 +1210,7 @@ class BotAccount {
             this._saveQueue(); await sleep(rand(1000,3000)); continue;
           }
           await sleep(rand(800, 2500));
-          const { rawMsg, personalizedLink, result } = await this._deliverToNumber(number, contact);
+          const { rawMsg, personalizedLink, result } = await this._deliverToNumber(number, contact, { skipProbe: true });
           this._consecutiveRejects = 0;
           contact.status='done'; contact.sentAt=new Date().toISOString();
           contact.waMessageId=result.lastId; contact.whatsappMessagesSent=result.messageCount;
@@ -1398,7 +1429,7 @@ app.get('/api/health', (req, res) => {
     ok: true,
     version: APP_VERSION,
     commit: BUILD_COMMIT,
-    features: { resetAuth: true, ghostDetection: true, messageAck: true },
+    features: { resetAuth: true, ghostDetection: true, messageAck: true, combinedLinkMessage: !useSplitLinkMessages() },
     resetAuthOnStart: [...RESET_AUTH_ON_START],
     uptimeSec: Math.round(process.uptime()),
   });

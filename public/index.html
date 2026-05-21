@@ -565,16 +565,6 @@ tr:hover td{background:var(--surface2)}
           </ol>
         </div>
       </div>
-      <div class="card" style="margin-top:14px;border-color:color-mix(in oklch,var(--yellow) 35%,var(--border))">
-        <div class="card-title">Session fantôme ?</div>
-        <p style="font-size:13px;color:var(--muted);line-height:1.7;margin-bottom:12px">
-          Si le bot semble connecté mais les messages n'apparaissent pas sur votre téléphone, supprimez la session et rescannez un nouveau QR.
-        </p>
-        <button class="btn btn-danger" id="btn-reset-auth" onclick="resetAuth()">🔑 Reset Auth — Nouveau QR</button>
-                <div id="session-health-banner" style="display:none;margin-top:12px;padding:10px 14px;border-radius:var(--radius);font-size:13px;line-height:1.5"></div>
-        <button class="btn btn-ghost" style="margin-top:10px" onclick="checkSession()">🔍 Vérifier synchronisation session</button>
-        <span id="reset-auth-status" style="font-size:12px;color:var(--muted);margin-left:10px"></span>
-      </div>
     </div>
 
     <!-- ─── PARAMÈTRES ───────────────────────────────── -->
@@ -891,17 +881,9 @@ const AVG = 82; // repli si l'API ne renvoie pas estimatedQueueSec
 
 function countOutboundMessagesClient(msg, link) {
   const text = (msg || '').trim();
-  const separateLink = !!(link && link.trim());
-  if (separateLink && text) return 2;
-  if (separateLink) return 1;
-  const m = text.match(/(https?:\/\/[^\s]+)/i);
-  if (m) {
-    const before = text.slice(0, m.index).trim();
-    const after = text.slice(m.index + m[1].length).trim();
-    const hasText = !!(before || after);
-    return hasText ? 2 : 1;
-  }
-  return text ? 1 : 0;
+  const lnk = (link || '').trim();
+  if (!text && !lnk) return 0;
+  return 1;
 }
 
 function queueEtaSeconds(r) {
@@ -1204,28 +1186,6 @@ function applyStatus(r) {
   updateQR(r.qr, readyShown, acct);
   paintConnBadge(acct, readyShown);
 
-  const sessBanner = document.getElementById('session-health-banner');
-  if (sessBanner && document.getElementById('page-connection')?.classList.contains('active')) {
-    if (!r.ready) { sessBanner.style.display = 'none'; }
-    else if (r.sessionHealthy === false) {
-      sessBanner.style.display = 'block';
-      sessBanner.style.background = 'color-mix(in oklch, var(--red) 12%, transparent)';
-      sessBanner.style.color = 'var(--red)';
-      sessBanner.textContent = '⚠️ Session non synchronisée — envois silencieux possibles. Reset Auth, message test vers vous-même, ou Compte 2 si numéro restreint.';
-    } else if (r.sessionHealthy === null) {
-      sessBanner.style.display = 'block';
-      sessBanner.style.background = 'color-mix(in oklch, var(--yellow) 12%, transparent)';
-      sessBanner.style.color = 'var(--yellow)';
-      sessBanner.textContent = '⏳ Vérification de la session en cours (~20 s après connexion)...';
-    } else {
-      sessBanner.style.display = 'block';
-      sessBanner.style.background = 'color-mix(in oklch, var(--green) 12%, transparent)';
-      sessBanner.style.color = 'var(--green)';
-      sessBanner.textContent = '✅ Session validée — les messages devraient apparaître sur votre téléphone.';
-    }
-  }
-
-
   if (!document.getElementById('page-dashboard').classList.contains('active')) return;
   // Ne pas écraser le dashboard avec l'autre compte (évite le clignotement Connecté/Déconnecté)
   if (acct !== currentAccount) return;
@@ -1358,52 +1318,10 @@ function updateQR(qr, ready, acct) {
     lastQr[acct] = null;
   }
 }
-
-
-async function checkSession() {
-  const st = document.getElementById('session-health-banner');
-  if (st) { st.style.display = 'block'; st.textContent = '⏳ Vérification...'; }
-  try {
-    const r = await fetch(`/api/${currentAccount}/check-session`, { method: 'POST' }).then(x => x.json().catch(() => ({})));
-    if (r.ok) alert('Session WhatsApp synchronisée — vous pouvez lancer la queue.');
-    else alert(r.error || 'Session non fiable — faites Reset Auth ou attendez si le numéro est restreint.');
-  } catch (e) { alert('Erreur : ' + e.message); }
-  fetchStatus();
-}
-
-async function resetAuth() {
-  const acct = currentAccount;
-  if (!confirm(`Réinitialiser la session WhatsApp du compte ${acct} ?\n\nVous devrez rescanner le QR code. Les messages en queue restent en attente.`)) return;
-  const statusEl = document.getElementById('reset-auth-status');
-  const btn = document.getElementById('btn-reset-auth');
-  if (btn) btn.disabled = true;
-  if (statusEl) statusEl.textContent = 'Réinitialisation…';
-  try {
-    const r = await fetch(`/api/${acct}/reset-auth`, { method: 'POST' }).then(res => res.json().catch(() => ({})));
-    if (!r.ok) {
-      alert(r.error || 'Échec du reset auth — vérifiez GET /api/health sur votre URL Railway');
-      if (statusEl) statusEl.textContent = '';
-      return;
-    }
-    if (statusEl) statusEl.textContent = '✓ ' + (r.message || 'Nouveau QR dans quelques secondes');
-    lastQr[acct] = null;
-    connDisplay[acct] = { shown: false, since: 0 };
-    fetchStatus();
-  } catch (e) {
-    alert('Erreur réseau : ' + e.message);
-    if (statusEl) statusEl.textContent = '';
-  } finally {
-    if (btn) btn.disabled = false;
-  }
-}
-
 async function fetchStatus() {
   try {
     const r = await fetch(`/api/${currentAccount}/status`).then(res => res.json());
     applyStatus(r);
-    const resetSt = document.getElementById('reset-auth-status');
-    if (resetSt && r.resettingAuth) resetSt.textContent = '⏳ Génération du nouveau QR…';
-    else if (resetSt && resetSt.textContent.startsWith('⏳')) resetSt.textContent = '';
   } catch(e) {}
   const other = currentAccount === 1 ? 2 : 1;
   try {
