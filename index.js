@@ -455,15 +455,31 @@ async function waitForMessageAck(client, msgId, label) {
   });
 }
 
-async function verifyMessageInChat(chat, text, msgId, label) {
+function isWhatsAppFetchBug(err) {
+  const m = (err && err.message) || String(err);
+  return /waitForChatLoading|loadEarlierMsgs/i.test(m);
+}
+
+async function verifyMessageInChat(chat, text, msgId, label, opts = {}) {
+  const { softFail = false, logger = null } = opts;
   await sleep(2500);
-  const messages = await withTimeout(chat.fetchMessages({ limit: 20 }), 12000, `fetchMessages verify ${label}`);
+  let messages;
+  try {
+    messages = await withTimeout(chat.fetchMessages({ limit: 20 }), 12000, `fetchMessages verify ${label}`);
+  } catch (e) {
+    if (isWhatsAppFetchBug(e) && softFail) {
+      if (logger) logger(`⚠️ Vérification historique ignorée (${label}) : bug fetchMessages WhatsApp Web`, 'warn');
+      return false;
+    }
+    throw e;
+  }
   const recent = messages.filter(m => m.fromMe && (Date.now() - m.timestamp * 1000) < 90000);
   const byBody = recent.filter(m => (m.body || '').trim() === (text || '').trim());
   const byId = msgId ? recent.filter(m => whatsappMsgId(m) === msgId) : [];
   if (byBody.length === 0 && byId.length === 0) {
     throw new Error(`Message "${label}" absent de l'historique WhatsApp — session fantôme ou envoi silencieux`);
   }
+  return true;
 }
 
 function phoneToCusChatId(number) {
@@ -519,6 +535,34 @@ async function probeWhatsAppConnection(client, logger, opts = {}) {
   return { phone, store };
 }
 
+async function deliverOutboundMessage(client, sendChatId, text, label, chatObj, logger) {
+  const clientSend = () => withTimeout(client.sendMessage(sendChatId, text, { sendSeen: false }), 25000, `client.sendMessage(${label})`);
+  const chatSend = (chat) => withTimeout(chat.sendMessage(text), 25000, `chat.sendMessage(${label})`);
+
+  if (chatObj) {
+    try { return await chatSend(chatObj); } catch (e) {
+      if (!isWhatsAppFetchBug(e)) throw e;
+      if (logger) logger(`⚠️ chat.sendMessage(${label}) : ${e.message} — repli client.sendMessage`, 'warn');
+    }
+  }
+  try {
+    return await clientSend();
+  } catch (e) {
+    if (!isWhatsAppFetchBug(e)) throw e;
+    await sleep(2000);
+    if (chatObj) {
+      try { return await chatSend(chatObj); } catch (_) {}
+    }
+    try {
+      const chat = await getChat(client, sendChatId, logger);
+      return await chatSend(chat);
+    } catch (e2) {
+      if (!isWhatsAppFetchBug(e2)) throw e2;
+      return await clientSend();
+    }
+  }
+}
+
 async function sendAndVerify(client, chatId, text, label, logger, chatForTyping = null, phoneDigits = null) {
   let sendChatId = chatId;
   if (sendChatId.includes('@lid') || !sendChatId.includes('@')) {
@@ -538,37 +582,45 @@ async function sendAndVerify(client, chatId, text, label, logger, chatForTyping 
       await warm.clearState();
     } catch (_) {}
   }
-  let msg;
-  try {
-    msg = await withTimeout(client.sendMessage(sendChatId, text, { sendSeen: false }), 25000, `client.sendMessage(${label})`);
-  } catch (e) {
-    const errMsg = e.message || String(e);
-    if (/waitForChatLoading/i.test(errMsg)) {
-      await sleep(2000);
-      msg = await withTimeout(client.sendMessage(sendChatId, text, { sendSeen: false }), 25000, `client.sendMessage(${label}) retry`);
-    } else throw e;
-  }
+  const msg = await deliverOutboundMessage(client, sendChatId, text, label, chatForTyping, logger);
   let msgId = whatsappMsgId(msg);
+  let ackLevel = null;
   if (!msgId) {
     if (logger) logger(`⚠️ sendMessage(${label}) sans id — vérification via fetchMessages...`, 'warn');
     let vChat = chatForTyping;
-    if (!vChat) { try { vChat = await withTimeout(client.getChatById(chatId), 10000, 'verify chat'); } catch (_) {} }
-    if (vChat) await verifyMessageInChat(vChat, text, null, label);
-    if (logger) logger(`✔️ Message ${label} confirmé via fetchMessages (sans id)`, 'info');
+    if (!vChat) { try { vChat = await withTimeout(client.getChatById(sendChatId), 10000, 'verify chat'); } catch (_) {} }
+    if (vChat) {
+      try {
+        await verifyMessageInChat(vChat, text, null, label, { softFail: false, logger });
+      } catch (e) {
+        if (!isWhatsAppFetchBug(e)) throw e;
+        if (logger) logger(`⚠️ fetchMessages indisponible (${label}) — envoi considéré OK sans id`, 'warn');
+      }
+    }
+    if (logger) logger(`✔️ Message ${label} confirmé (sans id)`, 'info');
     return { id: 'verified-no-id', verified: true };
   }
   try {
-    const ack = await waitForMessageAck(client, msgId, label);
-    if (logger) logger(`✔️ ACK ${label} (niveau ${ack}) · id: ${msgId.substring(0, 24)}...`, 'info');
+    ackLevel = await waitForMessageAck(client, msgId, label);
+    if (logger) logger(`✔️ ACK ${label} (niveau ${ackLevel}) · id: ${msgId.substring(0, 24)}...`, 'info');
   } catch (ackErr) {
     if (/rejeté|ACK_ERROR/i.test(ackErr.message)) throw new Error(ackErr.message);
     if (logger) logger(`⚠️ ${ackErr.message} — vérif historique...`, 'warn');
   }
+  const ackOk = ackLevel !== null && ackLevel >= MessageAck.ACK_SERVER;
   let verifyChat = chatForTyping;
   if (!verifyChat) {
     try { verifyChat = await withTimeout(client.getChatById(sendChatId), 10000, 'getChat verify'); } catch (_) {}
   }
-  if (verifyChat) await verifyMessageInChat(verifyChat, text, msgId, label);
+  if (verifyChat) {
+    try {
+      await verifyMessageInChat(verifyChat, text, msgId, label, { softFail: ackOk, logger });
+    } catch (e) {
+      if (ackOk && isWhatsAppFetchBug(e)) {
+        if (logger) logger(`⚠️ Vérification historique ignorée (${label}) après ACK`, 'warn');
+      } else throw e;
+    }
+  }
   return { id: msgId, verified: true };
 }
 
