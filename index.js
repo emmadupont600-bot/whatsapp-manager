@@ -45,6 +45,10 @@ function getColdOpenerText() {
   return (process.env.COLD_OPENER_MESSAGE || 'Hey').trim();
 }
 
+function useUiSendAll() {
+  return process.env.UI_SEND_ALL !== '0';
+}
+
 function useAckColdSoft() {
   return process.env.ACK_COLD_SOFT === '1';
 }
@@ -991,14 +995,40 @@ async function deliverOutboundMessage(client, sendChatId, text, label, chatObj, 
 
 async function sendSingleOutbound(client, chatId, text, label, logger, prefetchedChat, opts = {}) {
   const pn = chatId.split('@')[0].replace(/\D/g, '');
-  const useUi = process.env.UI_SEND_OPENER !== '0' && (opts.viaUi || label === 'hey-ui' || label === 'opener-ui');
-  if (useUi && client.pupPage && (label.includes('hey') || label.includes('opener') || opts.viaUi)) {
+  const cusId = normalizeOutboundChatId(chatId, pn);
+  const wantUi = process.env.UI_SEND_OPENER !== '0' && (
+    useUiSendAll() || opts.viaUi || opts.manualOpener || opts.forceUi ||
+    /hey|ui-retry/i.test(label)
+  );
+
+  const tryUi = async (stepLabel) => {
+    if (!wantUi || !client.pupPage) return null;
     await openChatViaStore(client, pn, logger);
-    const uiOk = await sendTextViaComposerUI(client, normalizeOutboundChatId(chatId, pn), text, logger, label);
+    const uiOk = await sendTextViaComposerUI(client, cusId, text, logger, stepLabel);
     if (uiOk) return { id: 'ui-verified', verified: true, viaUi: true };
-    if (logger) logger(`⚠️ Envoi UI échoué (${label}) — repli API`, 'warn');
+    return null;
+  };
+
+  const uiFirst = await tryUi(label);
+  if (uiFirst) {
+    if (logger) logger(`✔️ Livré via saisie WhatsApp Web (${label})`, 'success');
+    return uiFirst;
   }
-  return sendAndVerify(client, chatId, text, label, logger, prefetchedChat, pn, opts);
+  if (wantUi && logger) logger(`⚠️ Saisie UI (${label}) non confirmée — essai API`, 'warn');
+
+  try {
+    return await sendAndVerify(client, chatId, text, label, logger, prefetchedChat, pn, opts);
+  } catch (e) {
+    if (/rejeté|ACK_ERROR/i.test(e.message) && client.pupPage && process.env.UI_RETRY_ON_ACK !== '0') {
+      if (logger) logger(`🔁 ACK_ERROR API → retry saisie clavier (${label})`, 'warn');
+      const uiRetry = await tryUi(`${label}-ui-retry`);
+      if (uiRetry) {
+        if (logger) logger(`✔️ Livré après retry UI (${label})`, 'success');
+        return uiRetry;
+      }
+    }
+    throw e;
+  }
 }
 
 async function sendAndVerify(client, chatId, text, label, logger, chatForTyping = null, phoneDigits = null, opts = {}) {
@@ -1475,10 +1505,15 @@ class BotAccount {
     const ackSoft = !!((opts.coldContact || opts.manualOpener) && useAckColdSoft());
     const doSend = async (text, label, useTypingChat, extra = {}) => {
       const pn = chatId.split('@')[0].replace(/\D/g, '');
-      const sendLabel = extra.viaUi ? 'hey-ui' : label;
+      const sendLabel = (extra.viaUi || useUiSendAll()) ? `${label}-ui` : label;
       const result = await sendSingleOutbound(
         this.client, chatId, text, sendLabel, this.log.bind(this), useTypingChat,
-        { ackSoft, viaUi: extra.viaUi, manualOpener: opts.manualOpener }
+        {
+          ackSoft,
+          viaUi: !!(extra.viaUi || useUiSendAll()),
+          forceUi: !!(extra.forceUi || useUiSendAll()),
+          manualOpener: opts.manualOpener
+        }
       );
       ids.push(result.id);
       return result.id;
@@ -1571,9 +1606,13 @@ class BotAccount {
       if (process.env.UI_SEND_OPENER !== '0') {
         await openChatViaStore(this.client, number, this.log.bind(this));
         const uiHey = await sendTextViaComposerUI(this.client, sendId, openerText, this.log.bind(this), 'hey');
-        openerResult = uiHey
-          ? { messageCount: 1, ids: ['ui-verified'], lastId: 'ui-verified' }
-          : await this._sendMessage(sendId, openerText, '', prefetchedChat, { ...sendOpts, manualOpener: true });
+        if (uiHey) {
+          this.log('✅ Hey confirmé dans le chat (saisie clavier)', 'success');
+          openerResult = { messageCount: 1, ids: ['ui-verified'], lastId: 'ui-verified' };
+        } else {
+          this.log('⚠️ Hey : saisie UI non confirmée — essai API', 'warn');
+          openerResult = await this._sendMessage(sendId, openerText, '', prefetchedChat, { ...sendOpts, manualOpener: true, forceUi: true });
+        }
       } else {
         openerResult = await this._sendMessage(sendId, openerText, '', prefetchedChat, sendOpts);
       }
@@ -1581,9 +1620,9 @@ class BotAccount {
       if (splitRoute) {
         const textOnly = personalizeMessage((message ?? contact.message ?? '').trim() || process.env.DEFAULT_MESSAGE || '', contact);
         const linkOnly = personalizeMessage((link ?? contact.link ?? '').trim(), contact);
-        const textResult = await this._sendMessage(sendId, textOnly, '', prefetchedChat, sendOpts);
+        const textResult = await this._sendMessage(sendId, textOnly, '', prefetchedChat, { ...sendOpts, forceUi: useUiSendAll() });
         await sleep(rand(config.linkDelayMin, config.linkDelayMax));
-        const linkResult = await this._sendMessage(sendId, linkOnly, '', prefetchedChat, sendOpts);
+        const linkResult = await this._sendMessage(sendId, linkOnly, '', prefetchedChat, { ...sendOpts, forceUi: useUiSendAll() });
         result = {
           messageCount: openerResult.messageCount + textResult.messageCount + linkResult.messageCount,
           ids: [...(openerResult.ids || []), ...(textResult.ids || []), ...(linkResult.ids || [])],
@@ -1600,9 +1639,9 @@ class BotAccount {
     } else if (splitRoute) {
       const textOnly = personalizeMessage((message ?? contact.message ?? '').trim() || process.env.DEFAULT_MESSAGE || '', contact);
       const linkOnly = personalizeMessage((link ?? contact.link ?? '').trim(), contact);
-      const textResult = await this._sendMessage(sendId, textOnly, '', prefetchedChat, sendOpts);
+      const textResult = await this._sendMessage(sendId, textOnly, '', prefetchedChat, { ...sendOpts, forceUi: useUiSendAll() });
       await sleep(rand(config.linkDelayMin, config.linkDelayMax));
-      const linkResult = await this._sendMessage(sendId, linkOnly, '', prefetchedChat, sendOpts);
+      const linkResult = await this._sendMessage(sendId, linkOnly, '', prefetchedChat, { ...sendOpts, forceUi: useUiSendAll() });
       result = {
         messageCount: textResult.messageCount + linkResult.messageCount,
         ids: [...(textResult.ids || []), ...(linkResult.ids || [])],
@@ -1925,7 +1964,7 @@ app.get('/api/health', (req, res) => {
     ok: true,
     version: APP_VERSION,
     commit: BUILD_COMMIT,
-    features: { resetAuth: true, ghostDetection: true, messageAck: true, combinedLinkMessage: !useSplitLinkMessages(), coldContactSync: true, manualSearchFlow: true, coldOpener: true, ackColdSoft: false, manualSearchDom: true, manualRouteSplit: true },
+    features: { resetAuth: true, ghostDetection: true, messageAck: true, combinedLinkMessage: !useSplitLinkMessages(), coldContactSync: true, manualSearchFlow: true, coldOpener: true, ackColdSoft: false, manualSearchDom: true, manualRouteSplit: true, uiSendAll: true, uiRetryOnAck: true },
     resetAuthOnStart: [...RESET_AUTH_ON_START],
     uptimeSec: Math.round(process.uptime()),
   });
