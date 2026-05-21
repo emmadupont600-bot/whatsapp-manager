@@ -466,18 +466,21 @@ async function verifyMessageInChat(chat, text, msgId, label) {
   }
 }
 
-async function resolveOutboundChatId(client, number, logger) {
+function phoneToCusChatId(number) {
   const pn = String(number).replace(/\D/g, '');
-  let chatId = `${pn}@c.us`;
+  if (!pn || pn.length < 8) throw new Error(`Numéro invalide : ${number}`);
+  return `${pn}@c.us`;
+}
+
+async function resolveOutboundChatId(client, number, logger) {
+  const chatId = phoneToCusChatId(number);
+  // Ne pas utiliser @lid pour l'envoi — provoque waitForChatLoading dans whatsapp-web.js
   try {
-    const wid = await withTimeout(client.getNumberId(pn), 10000, `getNumberId(${pn})`);
-    if (wid && wid._serialized) {
-      chatId = wid._serialized;
-      if (logger) logger(`📇 ID WhatsApp résolu pour +${pn} → ${chatId}`, 'info');
+    const wid = await withTimeout(client.getNumberId(chatId.replace('@c.us', '')), 5000, 'getNumberId');
+    if (wid && wid._serialized && wid._serialized.includes('@lid') && logger) {
+      logger(`ℹ️ +${number} a un LID interne — envoi via ${chatId} (format classique)`, 'info');
     }
-  } catch (e) {
-    if (logger) logger(`⚠️ getNumberId(${pn}) : ${e.message} — utilisation ${chatId}`, 'warn');
-  }
+  } catch (_) {}
   return chatId;
 }
 
@@ -516,15 +519,35 @@ async function probeWhatsAppConnection(client, logger, opts = {}) {
   return { phone, store };
 }
 
-async function sendAndVerify(client, chatId, text, label, logger, chatForTyping = null) {
+async function sendAndVerify(client, chatId, text, label, logger, chatForTyping = null, phoneDigits = null) {
+  let sendChatId = chatId;
+  if (sendChatId.includes('@lid') || !sendChatId.includes('@')) {
+    sendChatId = phoneToCusChatId(phoneDigits || chatId);
+  }
   if (chatForTyping) {
     try {
       await chatForTyping.sendStateTyping();
       await sleep(rand(config.typingMin, config.typingMax));
       await chatForTyping.clearState();
     } catch (_) {}
+  } else {
+    try {
+      const warm = await withTimeout(client.getChatById(sendChatId), 12000, 'warm chat');
+      await warm.sendStateTyping();
+      await sleep(rand(config.typingMin, config.typingMax));
+      await warm.clearState();
+    } catch (_) {}
   }
-  const msg = await withTimeout(client.sendMessage(chatId, text, { sendSeen: false }), 25000, `client.sendMessage(${label})`);
+  let msg;
+  try {
+    msg = await withTimeout(client.sendMessage(sendChatId, text, { sendSeen: false }), 25000, `client.sendMessage(${label})`);
+  } catch (e) {
+    const errMsg = e.message || String(e);
+    if (/waitForChatLoading/i.test(errMsg)) {
+      await sleep(2000);
+      msg = await withTimeout(client.sendMessage(sendChatId, text, { sendSeen: false }), 25000, `client.sendMessage(${label}) retry`);
+    } else throw e;
+  }
   let msgId = whatsappMsgId(msg);
   if (!msgId) {
     if (logger) logger(`⚠️ sendMessage(${label}) sans id — vérification via fetchMessages...`, 'warn');
@@ -538,11 +561,12 @@ async function sendAndVerify(client, chatId, text, label, logger, chatForTyping 
     const ack = await waitForMessageAck(client, msgId, label);
     if (logger) logger(`✔️ ACK ${label} (niveau ${ack}) · id: ${msgId.substring(0, 24)}...`, 'info');
   } catch (ackErr) {
-    if (logger) logger(`⚠️ ${ackErr.message} — double-check historique...`, 'warn');
+    if (/rejeté|ACK_ERROR/i.test(ackErr.message)) throw new Error(ackErr.message);
+    if (logger) logger(`⚠️ ${ackErr.message} — vérif historique...`, 'warn');
   }
   let verifyChat = chatForTyping;
   if (!verifyChat) {
-    try { verifyChat = await withTimeout(client.getChatById(chatId), 10000, 'getChat verify'); } catch (_) {}
+    try { verifyChat = await withTimeout(client.getChatById(sendChatId), 10000, 'getChat verify'); } catch (_) {}
   }
   if (verifyChat) await verifyMessageInChat(verifyChat, text, msgId, label);
   return { id: msgId, verified: true };
@@ -562,6 +586,7 @@ class BotAccount {
     this._queueLoopActive = false;
     this._resettingAuth  = false;
     this._initializing   = false;
+    this._postReadyScheduled = false;
     this.state = {
       qr: null, ready: false, running: false, paused: false, sessionHealthy: null,
       queue: [], sessionCount: 0,
@@ -825,6 +850,8 @@ class BotAccount {
     });
     c.on('ready', async () => {
       this.retryCount = 0; this.state.ready = true; this.state.qr = null;
+      if (this._postReadyScheduled) return;
+      this._postReadyScheduled = true;
       this.state.sessionHealthy = null;
       try {
         const info = c.info;
@@ -848,6 +875,7 @@ class BotAccount {
     });
     c.on('disconnected', reason => {
       this.state.ready = false; this.state.running = false;
+      this._postReadyScheduled = false;
       this.log(`WhatsApp déconnecté : ${reason}`, 'error');
       if (!this._resettingAuth) this._scheduleRetry(reason === 'LOGOUT' ? 30000 : 8000);
     });
@@ -900,6 +928,7 @@ class BotAccount {
     this.state.running  = false;
     this.state.qr       = null;
     this.state.sessionHealthy = null;
+    this._postReadyScheduled = false;
     this._queueLoopActive = false;
     this.retryCount = 0;
 
@@ -934,7 +963,8 @@ class BotAccount {
       this.log(`⚠️ getChatById pour typing : ${e.message}`, 'warn');
     }
     const doSend = async (text, label, useTypingChat) => {
-      const result = await sendAndVerify(this.client, chatId, text, label, this.log.bind(this), useTypingChat);
+      const pn = chatId.split('@')[0].replace(/\D/g, '');
+      const result = await sendAndVerify(this.client, chatId, text, label, this.log.bind(this), useTypingChat, pn);
       ids.push(result.id);
       return result.id;
     };
@@ -1116,7 +1146,7 @@ class BotAccount {
           await this._delayMsg();
           if (!this.state.running) break;
         } catch(err) {
-          if (/session fant[oô]me|identiques|silencieux|ACK_ERROR|rejet[eé]/i.test(err.message)) {
+          if (/session fant[oô]me|identiques|silencieux|ACK_ERROR|rejet[eé]|waitForChatLoading/i.test(err.message)) {
             contact.status = 'pending';
             this._handleGhostSession(err);
             break;
