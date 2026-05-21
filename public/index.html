@@ -628,7 +628,8 @@ function renderHistory() {
     tbody.innerHTML = page.map(c => {
       const phone   = c.phone||c.telephone||'';
       const prenom  = c.prenom||c.name||'';
-      const acct    = c.account ? `<span class="account-badge ${c.account==2?'badge-a2':'badge-a1'}">N°${c.account}</span>` : '—';
+      const acctNum = c.botId || c.account;
+      const acct    = acctNum ? `<span class="account-badge ${acctNum==2?'badge-a2':'badge-a1'}">N°${acctNum}</span>` : '—';
       const reply   = c.replyText ? `<span title="${c.replyText.replace(/"/g,'&quot;')}" style="cursor:help;color:var(--purple)">💬 ${c.replyText.substring(0,30)}${c.replyText.length>30?'…':''}</span>` : '—';
       const sentAt  = c.sentAt ? new Date(c.sentAt).toLocaleString('fr-FR') : '—';
       return `<tr>
@@ -638,7 +639,7 @@ function renderHistory() {
         <td>${statusBadge(c.status||'done')}</td>
         <td style="max-width:180px">${reply}</td>
         <td style="font-size:11px;color:var(--muted)">${sentAt}</td>
-        <td><button class="btn btn-danger" style="padding:3px 8px;font-size:11px" onclick="deleteHistEntry('${phone}','${c.account||''}')">🗑</button></td>
+        <td><button class="btn btn-danger" style="padding:3px 8px;font-size:11px" onclick="deleteHistEntry('${phone}')">🗑</button></td>
       </tr>`;
     }).join('');
   }
@@ -654,11 +655,11 @@ function renderHistory() {
 
 function goHistPage(n) { histPage=n; renderHistory(); }
 
-async function deleteHistEntry(phone, account) {
+async function deleteHistEntry(phone) {
   if (!confirm(`Supprimer l'entrée ${phone} de l'historique ?`)) return;
   try {
-    await fetch('/api/sent-history', {method:'DELETE', headers:{'Content-Type':'application/json'}, body:JSON.stringify({phone, account})});
-    histData = histData.filter(c => !((c.phone||c.telephone)===phone && (!account || String(c.account)===String(account))));
+    await fetch(`/api/sent-history/${encodeURIComponent(phone.replace(/\D/g,''))}`, {method:'DELETE'});
+    histData = histData.filter(c => (c.phone||c.telephone||'').replace(/\D/g,'') !== phone.replace(/\D/g,''));
     renderHistory();
   } catch(e) { alert('Erreur lors de la suppression'); }
 }
@@ -666,7 +667,7 @@ async function deleteHistEntry(phone, account) {
 async function purgeHistory() {
   if (!confirm('Supprimer TOUT l\'historique global ? Cette action est irréversible.')) return;
   try {
-    await fetch('/api/sent-history/purge', {method:'POST'});
+    await fetch('/api/sent-history', {method:'DELETE'});
     histData = []; renderHistory();
   } catch(e) { alert('Erreur lors de la purge'); }
 }
@@ -762,16 +763,6 @@ function exportStatus(status) {
   window.open(`/api/${currentAccount}/export?status=${status}`, '_blank');
 }
 
-/* ═══════════════════════════════════════════════════
-   NAVIGATION — mise à jour showPage
-   (ajouter ces cas dans la fonction showPage existante)
-   IMPORTANT : ne pas réécrire showPage, juste ajouter
-   ces lignes DANS le if-chain existant :
-
-   if (name==='history') loadHistory();
-   if (name==='stats')   { loadStats(); loadChartJS(); }
-
-═══════════════════════════════════════════════════ */
 function loadChartJS() {
   if (window.Chart) return;
   const s = document.createElement('script');
@@ -887,8 +878,597 @@ function showPage(name, el) {
   if (name==='queue')      { document.getElementById('queue-title').textContent = `Queue — ${label}`; loadQueue(); }
   if (name==='groups')     loadGroups();
   if (name==='overview')   renderOverview();
-    if (name==='history')  loadHistory();
-  if (name==='stats')    { if (!window.Chart) loadChartJS(); else loadStats(); }
-  if (name==='blacklist') loadBlacklist();
-  if (name==='settings') loadSettingsFromConfig();
+  if (name==='history')    loadHistory();
+  if (name==='stats')      { if (!window.Chart) loadChartJS(); else loadStats(); }
+  if (name==='settings')   { loadSettings(); updateNotifUI(); }
+  if (name==='blacklist')  loadBlacklist();
 }
+
+/* ═══════════════════════════════════════════════════
+   HELPERS
+═══════════════════════════════════════════════════ */
+function formatDuration(s) {
+  if (s < 60)   return Math.round(s)+'s';
+  if (s < 3600) return Math.floor(s/60)+'min';
+  const h=Math.floor(s/3600),m=Math.floor((s%3600)/60);
+  return h>0?h+'h '+m+'min':m+'min';
+}
+function formatTime(d){ return d.toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'}); }
+function formatCountdown(ms) {
+  if (ms <= 0) return '0s';
+  const s = Math.floor(ms/1000);
+  const h = Math.floor(s/3600), m = Math.floor((s%3600)/60), ss = s%60;
+  if (h > 0) return `${h}h ${String(m).padStart(2,'0')}min`;
+  if (m > 0) return `${m}min ${String(ss).padStart(2,'0')}s`;
+  return `${ss}s`;
+}
+
+function statusBadge(s) {
+  const map = { pending:'badge-yellow', done:'badge-green', failed:'badge-red', skipped:'badge-yellow', relayed:'badge-blue', replied:'badge-blue', blacklisted:'badge-red' };
+  const icon = { pending:'⏳',done:'✅',failed:'❌',skipped:'⏭',relayed:'🔁',replied:'💬',blacklisted:'🚫' };
+  return `<span class="badge ${map[s]||'badge-blue'}">${icon[s]||''} ${s}</span>`;
+}
+
+/* ═══════════════════════════════════════════════════
+   STATUS POLLING
+═══════════════════════════════════════════════════ */
+function applyStatus(r) {
+  const acct = r.id || currentAccount;
+  const prev = lastStatus[acct] || {};
+  lastStatus[acct] = r;
+
+  if (prev.running && !r.running && !r.paused && r.pending === 0 && r.total > 0) {
+    fireNotification('✅ Queue terminée', `Compte ${acct} — ${r.stats.sent} messages envoyés.`, '✅');
+  }
+  if (!prev.limitReached && r.limitReached) {
+    fireNotification('⛔ Quota atteint', `Compte ${acct} — ${r.dailySent}/${r.dailyLimit} msgs. Reprise dans ${formatCountdown(r.resetInMs)}.`, '⛔');
+  }
+
+
+    // FIX: QR + badges toujours mis à jour peu importe la page active
+  updateQR(r.qr, r.ready, acct);
+  const _b1=document.getElementById('conn-badge-1'),_b2=document.getElementById('conn-badge-2');
+  if (acct===1&&_b1) _b1.textContent=r.ready?'✅':'N°1';
+  if (acct===2&&_b2) _b2.textContent=r.ready?'✅':'N°2';
+
+  if (!document.getElementById('page-dashboard').classList.contains('active')) return;
+
+  document.getElementById('stat-sent').textContent    = r.stats.sent;
+  document.getElementById('stat-pending').textContent  = r.pending;
+  document.getElementById('stat-failed').textContent   = r.stats.failed+r.stats.skipped;
+  document.getElementById('status-badge').innerHTML    = r.ready
+    ? '<span class="badge badge-green"><span class="dot"></span>Connecté</span>'
+    : '<span class="badge badge-red"><span class="dot"></span>Déconnecté</span>';
+
+  const pctQ = r.dailyLimit > 0 ? Math.min(100, Math.round(r.dailySent / r.dailyLimit * 100)) : 0;
+  document.getElementById('quota-count').textContent = `${r.dailySent} / ${r.dailyLimit}`;
+  document.getElementById('quota-pct').textContent   = pctQ + '%';
+  const bar = document.getElementById('quota-bar');
+  bar.style.width = pctQ + '%';
+  bar.className = 'quota-fill' + (pctQ >= 100 ? ' full' : pctQ >= 70 ? '' : ' ok');
+  document.getElementById('limit-input').value = r.dailyLimit;
+
+  const qBadge = document.getElementById('quota-badge');
+  if (pctQ >= 100) qBadge.innerHTML = '<span class="badge badge-red">⛔ Quota atteint</span>';
+  else if (pctQ >= 70) qBadge.innerHTML = '<span class="badge badge-yellow">⚠️ Bientôt atteint</span>';
+  else qBadge.innerHTML = '<span class="badge badge-green">✓ OK</span>';
+
+  if (countdownInterval) clearInterval(countdownInterval);
+  if (r.windowStart && r.resetInMs > 0) {
+    const targetTs = Date.now() + r.resetInMs;
+    const tick = () => {
+      const left = targetTs - Date.now();
+      document.getElementById('quota-countdown').textContent = left > 0 ? formatCountdown(left) : '↻ Reset';
+    };
+    tick(); countdownInterval = setInterval(tick, 1000);
+  } else {
+    document.getElementById('quota-countdown').textContent = r.dailySent > 0 ? '24h' : '—';
+  }
+
+  const alertBox = document.getElementById('quota-alert');
+  if (r.limitReached) {
+    alertBox.style.display = 'block';
+    document.getElementById('quota-alert-msg').textContent = `${r.dailySent} messages envoyés — limite de ${r.dailyLimit} atteinte.`;
+    const resetInfo = document.getElementById('quota-reset-info');
+    if (r.resumeAt) {
+      const d = new Date(r.resumeAt);
+      resetInfo.textContent = `⏰ Reprise automatique prévue : ${formatTime(d)}${d.toDateString()===new Date().toDateString()?' auj.':', le '+d.toLocaleDateString('fr-FR')}`;
+    } else if (r.resetInMs > 0) {
+      resetInfo.textContent = `⏳ Quota se remet à 0 dans ${formatCountdown(r.resetInMs)}`;
+    }
+    document.getElementById('auto-resume-badge').innerHTML = r.autoResume
+      ? '<span class="badge badge-blue">🔄 Reprise auto activée</span>'
+      : '<span class="badge badge-yellow">⚠️ Reprise auto désactivée</span>';
+  } else { alertBox.style.display = 'none'; }
+
+  const done=r.total-r.pending, pct=r.total>0?Math.round(done/r.total*100):0;
+  document.getElementById('progress-bar').style.width   = pct+'%';
+  document.getElementById('progress-label').textContent = done+' / '+r.total+' contacts traités';
+  document.getElementById('progress-pct').textContent   = pct+'%';
+  document.getElementById('btn-pause').textContent      = r.paused ? '▶ Reprendre' : '⏸ Pause';
+
+  const wrap = document.getElementById('resume-box-wrap');
+  wrap.innerHTML = (r.pending>0 && !r.running && r.ready && !r.limitReached)
+    ? `<div style="background:color-mix(in oklch,var(--yellow) 8%,var(--surface2));border:1px solid color-mix(in oklch,var(--yellow) 25%,transparent);border-radius:var(--radius-sm);padding:9px 13px;font-size:12px;color:var(--yellow);display:flex;align-items:center;gap:8px;margin-bottom:8px">♻️ <strong>${r.pending} contacts en attente</strong> — cliquez Démarrer pour reprendre</div>` : '';
+
+  const etaBox=document.getElementById('eta-box'),statEta=document.getElementById('stat-eta'),etaLabel=document.getElementById('stat-eta-label');
+  if (r.pending>0&&r.running&&!r.paused) {
+    const sec=r.pending*AVG,fin=new Date(Date.now()+sec*1000);
+    statEta.textContent=formatDuration(sec); etaLabel.textContent='temps restant';
+    document.getElementById('eta-finish').textContent=formatTime(fin)+(fin.toDateString()===new Date().toDateString()?' auj.':' demain');
+    etaBox.style.display='flex';
+  } else if (r.pending>0) {
+    statEta.textContent=formatDuration(r.pending*AVG); etaLabel.textContent='si démarré maintenant'; etaBox.style.display='none';
+  } else {
+    statEta.textContent=r.total>0?'✅':'—'; etaLabel.textContent=r.total>0?'terminé':'aucun contact'; etaBox.style.display='none';
+  }
+
+  document.getElementById('log').innerHTML = r.log.map(l=>{
+    const t=new Date(l.time).toLocaleTimeString('fr-FR');
+    return `<div class="log-item"><span class="log-time">${t}</span><span class="log-${l.type}">${l.msg}</span></div>`;
+  }).join('');
+}
+
+function updateQR(qr, ready, acct) {
+  // Ne rien faire si on n'est pas sur la page connexion du bon compte
+  if (!document.getElementById('page-connection').classList.contains('active')) return;
+  if (currentAccount !== acct) return;
+
+  const wrap = document.getElementById('qr-wrap');
+
+  if (ready) {
+    wrap.innerHTML = `<div class="qr-placeholder" style="color:var(--green);border-color:var(--green)">
+      ✅ WhatsApp Connecté !</div>
+      <span class="qr-badge connected"><span class="dot"></span>Connecté</span>`;
+    lastQr[acct] = null; // reset pour regen si déco
+  } else if (qr) {
+    if (qr !== lastQr[acct]) {
+      lastQr[acct] = qr;
+      // Détecter si c'est du base64 ou une URL
+      const src = qr.startsWith('data:') ? qr : `data:image/png;base64,${qr}`;
+      wrap.innerHTML = `<img src="${src}" alt="QR" style="border-radius:var(--radius);background:#fff;padding:10px;width:220px;height:220px">
+        <span class="qr-badge scanning">Scannez maintenant</span>`;
+    }
+  } else {
+    // Pas encore de QR
+    wrap.innerHTML = `<div class="qr-placeholder">Génération QR...<br>
+      <small style="margin-top:8px;display:block">~30 secondes</small></div>`;
+    lastQr[acct] = null;
+  }
+}
+async function fetchStatus() {
+  for (const id of [1, 2]) {
+    try {
+      const r = await fetch(`/api/${id}/status`).then(r => r.json());
+      applyStatus(r);
+    } catch(e) {}
+  }
+}
+
+/* ═══════════════════════════════════════════════════
+   BOT CONTROLS
+═══════════════════════════════════════════════════ */
+async function startBot()  { const r=await fetch(`/api/${currentAccount}/start`,{method:'POST'}).then(r=>r.json()); if(!r.ok) alert('Erreur : '+r.error); }
+async function pauseBot()  { await fetch(`/api/${currentAccount}/pause`,{method:'POST'}); }
+async function clearQueue(){ if(!confirm('Vider la queue du compte '+currentAccount+' ?')) return; await fetch(`/api/${currentAccount}/clear`,{method:'POST'}); }
+function exportCSV()       { window.open(`/api/${currentAccount}/export`,'_blank'); }
+
+/* ═══════════════════════════════════════════════════
+   SCHEDULE
+═══════════════════════════════════════════════════ */
+async function scheduleBot() {
+  const val = document.getElementById('schedule-dt').value;
+  if (!val) return;
+  const dt = new Date(val);
+  if (dt <= new Date()) { alert('Choisissez une date dans le futur.'); return; }
+  const r = await fetch(`/api/${currentAccount}/schedule`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({scheduledAt:dt.toISOString()})}).then(r=>r.json()).catch(()=>({ok:false}));
+  if (r.ok !== false) {
+    document.getElementById('btn-cancel-schedule').style.display='inline-flex';
+    startScheduleCountdown(dt);
+  }
+}
+
+async function cancelSchedule() {
+  await fetch(`/api/${currentAccount}/schedule`,{method:'DELETE'}).catch(()=>{});
+  document.getElementById('btn-cancel-schedule').style.display='none';
+  document.getElementById('schedule-status').innerHTML='<span style="font-size:12px;color:var(--muted)">Planification annulée.</span>';
+  if (scheduleTimer) clearInterval(scheduleTimer);
+}
+
+function startScheduleCountdown(dt) {
+  if (scheduleTimer) clearInterval(scheduleTimer);
+  const el = document.getElementById('schedule-status');
+  const tick = () => {
+    const diff = dt - Date.now();
+    if (diff <= 0) { el.innerHTML='<span style="font-size:12px;color:var(--green)">▶ Démarrage en cours...</span>'; clearInterval(scheduleTimer); return; }
+    const h=Math.floor(diff/3600000),m=Math.floor((diff%3600000)/60000),s=Math.floor((diff%60000)/1000);
+    el.innerHTML=`<span style="font-size:12px;color:var(--purple)">📅 Démarrage dans <strong>${h>0?h+'h ':''} ${m>0?String(m).padStart(2,'0')+'min ':''}${String(s).padStart(2,'0')}s</strong> — ${dt.toLocaleString('fr-FR')}</span>`;
+  };
+  tick(); scheduleTimer = setInterval(tick, 1000);
+}
+
+/* ═══════════════════════════════════════════════════
+   TEST MESSAGE
+═══════════════════════════════════════════════════ */
+async function sendTestMessage() {
+  const phone = document.getElementById('test-phone').value.trim();
+  const msg   = document.getElementById('test-msg').value.trim() || 'Test depuis WA Manager 🤖';
+  if (!phone) { document.getElementById('test-result').innerHTML='<span class="badge badge-red">⚠️ Entrez un numéro</span>'; return; }
+  document.getElementById('test-result').innerHTML='<span style="color:var(--muted)">⏳ Envoi...</span>';
+  const r = await fetch(`/api/${currentAccount}/test-message`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phone,message:msg})}).then(r=>r.json()).catch(()=>({ok:false}));
+  document.getElementById('test-result').innerHTML = r.ok
+    ? '<span class="badge badge-green">✓ Message envoyé !</span>'
+    : `<span class="badge badge-red">Erreur : ${r.error||'inconnue'}</span>`;
+}
+
+/* ═══════════════════════════════════════════════════
+   QUEUE PAGE
+═══════════════════════════════════════════════════ */
+async function loadQueue() {
+  try {
+    const r = await fetch(`/api/${currentAccount}/queue?limit=500`).then(r=>r.json());
+    queueData = Array.isArray(r) ? r : (r.items||r.queue||[]);
+    queuePage = 1;
+    renderQueue();
+  } catch(e) { document.getElementById('queue-table').innerHTML='<tr><td colspan="6" style="color:var(--red);text-align:center;padding:20px">Erreur de chargement</td></tr>'; }
+}
+
+function setStatusFilter(status, btn) {
+  queueFilter = status;
+  queuePage = 1;
+  document.querySelectorAll('.filter-btn').forEach(b=>b.classList.remove('active'));
+  btn.classList.add('active');
+  renderQueue();
+}
+
+function filterQueue() {
+  queueSearch = document.getElementById('queue-search').value.toLowerCase();
+  queuePage = 1;
+  renderQueue();
+}
+
+async function removeQueueContact(phone) {
+  if (!confirm(`Retirer ${phone} de la queue ?`)) return;
+  try {
+    const r = await fetch(`/api/${currentAccount}/queue/${encodeURIComponent(phone)}`, {method:'DELETE'}).then(r=>r.json());
+    if (r.ok) { queueData = queueData.filter(c => (c.phone||'').replace(/\D/g,'') !== phone.replace(/\D/g,'')); renderQueue(); }
+    else alert(r.error || 'Erreur');
+  } catch(e) { alert('Erreur réseau'); }
+}
+
+function renderQueue() {
+  let filtered = queueData;
+  if (queueFilter !== 'all') {
+    if (queueFilter === 'replied') filtered = filtered.filter(c => c.replied === true);
+    else filtered = filtered.filter(c => c.status === queueFilter);
+  }
+  if (queueSearch) filtered = filtered.filter(c=>
+    String(c.phone||c.telephone||'').includes(queueSearch) ||
+    String(c.prenom||c.name||'').toLowerCase().includes(queueSearch) ||
+    String(c.nom||'').toLowerCase().includes(queueSearch)
+  );
+
+  const total = filtered.length;
+  document.getElementById('queue-count-label').textContent = `${total} contact${total>1?'s':''}`;
+
+  const pages = Math.ceil(total/Q_PER_PAGE)||1;
+  const page = filtered.slice((queuePage-1)*Q_PER_PAGE, queuePage*Q_PER_PAGE);
+
+  const tbody = document.getElementById('queue-table');
+  if (!page.length) {
+    tbody.innerHTML=`<tr><td colspan="6"><div class="empty-state"><div style="font-size:32px">🔍</div><p>Aucun contact pour ce filtre.</p></div></td></tr>`;
+  } else {
+    tbody.innerHTML = page.map(c=>{
+      const phone = c.phone||c.telephone||'';
+      const prenom = c.prenom||c.name||'';
+      const nom = c.nom||'';
+      const shortMsg = (c.message||'').substring(0,40)+(c.message&&c.message.length>40?'…':'');
+      const sentAt = c.sentAt ? new Date(c.sentAt).toLocaleString('fr-FR') : '—';
+      const st = c.replied ? 'replied' : (c.status||'pending');
+      return `<tr>
+        <td style="font-family:monospace;font-size:12px">${phone}</td>
+        <td>${prenom?`<strong>${prenom}</strong>${nom?' '+nom:''}`:'-'}</td>
+        <td>${statusBadge(st)}</td>
+        <td style="color:var(--muted);max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${(c.message||'').replace(/"/g,'&quot;')}">${shortMsg||'—'}</td>
+        <td style="font-size:11px;color:var(--muted)">${sentAt}</td>
+        <td><button class="btn btn-danger" style="padding:3px 8px;font-size:11px" onclick="removeQueueContact('${phone}')">🗑</button></td>
+      </tr>`;
+    }).join('');
+  }
+
+  const pg = document.getElementById('queue-pagination');
+  if (pages <= 1) { pg.innerHTML=''; return; }
+  let html='';
+  if (queuePage>1) html+=`<button class="btn btn-ghost" style="padding:5px 10px;font-size:12px" onclick="goQueuePage(${queuePage-1})">← Préc</button>`;
+  html+=`<span style="font-size:12px;color:var(--muted);align-self:center">Page ${queuePage} / ${pages}</span>`;
+  if (queuePage<pages) html+=`<button class="btn btn-ghost" style="padding:5px 10px;font-size:12px" onclick="goQueuePage(${queuePage+1})">Suiv →</button>`;
+  pg.innerHTML=html;
+}
+
+function goQueuePage(n) { queuePage=n; renderQueue(); document.getElementById('page-queue').scrollTop=0; }
+
+function exportQueueFiltered() {
+  const status = queueFilter !== 'all' ? `?status=${queueFilter}` : '';
+  window.open(`/api/${currentAccount}/export${status}`, '_blank');
+}
+
+/* ═══════════════════════════════════════════════════
+   BLACKLIST
+═══════════════════════════════════════════════════ */
+async function loadBlacklist() {
+  document.getElementById('bl-table').innerHTML = '<tr><td colspan="3" style="color:var(--muted);text-align:center;padding:24px">⏳ Chargement...</td></tr>';
+  try {
+    const r = await fetch('/api/blacklist').then(r=>r.json());
+    blData = Array.isArray(r) ? r : (r.list || r.numbers || r.items || []);
+    blPage = 1;
+    renderBlacklist();
+  } catch(e) {
+    document.getElementById('bl-table').innerHTML = '<tr><td colspan="3" style="color:var(--red);text-align:center;padding:20px">Erreur de chargement</td></tr>';
+  }
+}
+
+function renderBlacklist() {
+  const search = (document.getElementById('bl-search').value||'').toLowerCase();
+  let filtered = blData;
+  if (search) filtered = filtered.filter(e => String(e.phone||e.number||e).includes(search));
+
+  const total = filtered.length;
+  document.getElementById('bl-count').textContent = `${total} numéro${total>1?'s':''}`;
+
+  const pages = Math.ceil(total/BL_PER_PAGE)||1;
+  if (blPage > pages) blPage = pages;
+  const page = filtered.slice((blPage-1)*BL_PER_PAGE, blPage*BL_PER_PAGE);
+
+  const tbody = document.getElementById('bl-table');
+  if (!page.length) {
+    tbody.innerHTML = `<tr><td colspan="3"><div class="empty-state"><div style="font-size:32px">🚫</div><p>${search?'Aucun résultat pour cette recherche.':'La blacklist est vide.'}</p></div></td></tr>`;
+  } else {
+    tbody.innerHTML = page.map(e => {
+      const phone = e.phone||e.number||e;
+      const addedAt = e.addedAt ? new Date(e.addedAt).toLocaleString('fr-FR') : '—';
+      return `<tr>
+        <td style="font-family:monospace;font-size:12px">${phone}</td>
+        <td style="font-size:11px;color:var(--muted)">${addedAt}</td>
+        <td><button class="btn btn-danger" style="padding:4px 10px;font-size:11px" onclick="removeFromBlacklist('${phone}')">🗑 Retirer</button></td>
+      </tr>`;
+    }).join('');
+  }
+
+  const pg = document.getElementById('bl-pagination');
+  if (pages <= 1) { pg.innerHTML=''; return; }
+  let html='';
+  if (blPage>1) html+=`<button class="btn btn-ghost" style="padding:5px 10px;font-size:12px" onclick="goBlPage(${blPage-1})">← Préc</button>`;
+  html+=`<span style="font-size:12px;color:var(--muted);align-self:center">Page ${blPage} / ${pages}</span>`;
+  if (blPage<pages) html+=`<button class="btn btn-ghost" style="padding:5px 10px;font-size:12px" onclick="goBlPage(${blPage+1})">Suiv →</button>`;
+  pg.innerHTML=html;
+}
+
+function goBlPage(n) { blPage=n; renderBlacklist(); }
+
+async function addToBlacklist() {
+  const input = document.getElementById('bl-phone-input');
+  const phone = input.value.trim().replace(/\s+/g,'').replace(/^\+/,'');
+  const res = document.getElementById('bl-add-result');
+  if (!phone) { res.innerHTML='<span class="badge badge-red">⚠️ Entrez un numéro</span>'; return; }
+  res.innerHTML='<span style="color:var(--muted)">⏳...</span>';
+  try {
+    const r = await fetch('/api/blacklist/add',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phone})}).then(r=>r.json());
+    if (r.ok||r.added||r.success) {
+      res.innerHTML='<span class="badge badge-green">✓ Ajouté</span>';
+      input.value='';
+      await loadBlacklist();
+    } else {
+      res.innerHTML=`<span class="badge badge-yellow">⚠️ ${r.error||r.message||'Déjà présent ou erreur'}</span>`;
+    }
+  } catch(e) { res.innerHTML='<span class="badge badge-red">Erreur réseau</span>'; }
+}
+
+async function removeFromBlacklist(phone) {
+  if (!confirm(`Retirer ${phone} de la blacklist ?`)) return;
+  try {
+    await fetch('/api/blacklist/remove',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phone})});
+    blData = blData.filter(e=>(e.phone||e.number||e)!==phone);
+    renderBlacklist();
+  } catch(e) { alert('Erreur lors de la suppression'); }
+}
+
+function blHandleDragOver(e) { e.preventDefault(); document.getElementById('bl-drop-zone').style.borderColor='var(--primary)'; }
+function blHandleDrop(e) { e.preventDefault(); document.getElementById('bl-drop-zone').style.borderColor=''; const f=e.dataTransfer.files[0]; if(f) importBlacklistCSV(f); }
+
+async function importBlacklistCSV(file) {
+  if (!file) return;
+  document.getElementById('bl-dropzone-text').textContent = `⏳ Import de ${file.name}...`;
+  const res = document.getElementById('bl-import-result');
+  res.innerHTML='<span style="color:var(--muted)">⏳ Import en cours...</span>';
+  try {
+    const fd = new FormData(); fd.append('file', file);
+    const r = await fetch('/api/blacklist/import',{method:'POST',body:fd}).then(r=>r.json());
+    if (r.ok||r.added!==undefined) {
+      res.innerHTML=`<span class="badge badge-green">✓ ${r.added||0} numéros ajoutés${r.skipped?` · ${r.skipped} doublons ignorés`:''}</span>`;
+      await loadBlacklist();
+    } else {
+      res.innerHTML=`<span class="badge badge-red">Erreur : ${r.error||'inconnue'}</span>`;
+    }
+  } catch(e) { res.innerHTML='<span class="badge badge-red">Erreur réseau</span>'; }
+  document.getElementById('bl-dropzone-text').textContent='📄 Glissez un CSV ici, ou cliquez';
+  document.getElementById('bl-csv-input').value='';
+}
+
+/* ═══════════════════════════════════════════════════
+   MULTI-CSV IMPORT
+═══════════════════════════════════════════════════ */
+function handleDragOver(e) { e.preventDefault(); document.getElementById('drop-zone').style.borderColor='var(--primary)'; }
+function handleDrop(e) { e.preventDefault(); document.getElementById('drop-zone').style.borderColor=''; if(e.dataTransfer.files) addCSVFiles(e.dataTransfer.files); }
+
+function handleCSVFiles(files) { addCSVFiles(files); }
+
+function addCSVFiles(files) {
+  for (const f of files) {
+    if (!f.name.endsWith('.csv')) continue;
+    if (pendingCSVFiles.find(x=>x.name===f.name)) continue;
+    pendingCSVFiles.push(f);
+  }
+  renderCSVFileList();
+}
+
+function removeCSVFile(name) {
+  pendingCSVFiles = pendingCSVFiles.filter(f=>f.name!==name);
+  renderCSVFileList();
+}
+
+function clearCSVFiles() {
+  pendingCSVFiles = [];
+  document.getElementById('csv-file').value='';
+  renderCSVFileList();
+}
+
+function renderCSVFileList() {
+  const list = document.getElementById('csv-file-list');
+  const mergeInfo = document.getElementById('merge-info');
+  const btnImport = document.getElementById('btn-import-all');
+  const btnClear = document.getElementById('btn-clear-files');
+  if (!pendingCSVFiles.length) {
+    list.innerHTML=''; mergeInfo.style.display='none';
+    btnImport.style.display='none'; btnClear.style.display='none';
+    document.getElementById('dropzone-text').textContent='📄 Glissez un ou plusieurs CSV ici, ou cliquez';
+    return;
+  }
+  list.innerHTML = pendingCSVFiles.map(f=>`
+    <div class="csv-file-item">
+      <span>📄 ${f.name} <span style="color:var(--faint)">(${(f.size/1024).toFixed(1)} KB)</span></span>
+      <span class="remove-csv" onclick="removeCSVFile('${f.name}')">✕</span>
+    </div>`).join('');
+  mergeInfo.style.display = pendingCSVFiles.length>1 ? 'flex' : 'none';
+  document.getElementById('merge-info-text').textContent = pendingCSVFiles.length > 1
+    ? `${pendingCSVFiles.length} fichiers sélectionnés — les doublons seront ignorés automatiquement.`
+    : '1 fichier sélectionné.';
+  document.getElementById('dropzone-text').textContent=`✓ ${pendingCSVFiles.length} fichier${pendingCSVFiles.length>1?'s':''} sélectionné${pendingCSVFiles.length>1?'s':''}`;
+  btnImport.style.display='inline-flex'; btnClear.style.display='inline-flex';
+}
+
+async function importAllCSV() {
+  const message = document.getElementById('import-message').value.trim();
+  const link    = document.getElementById('import-link').value.trim();
+  if (!message) { document.getElementById('import-result').innerHTML='<span class="badge badge-red">⚠️ Écrivez un message</span>'; return; }
+  if (!pendingCSVFiles.length) return;
+
+  const btn = document.getElementById('btn-import-all');
+  btn.disabled=true; btn.textContent='⏳ Import en cours...';
+  let totalAdded=0, totalSkipped=0, errors=[];
+
+  for (const file of pendingCSVFiles) {
+    const fd=new FormData(); fd.append('file',file); fd.append('message',message); fd.append('merge','true');
+    if(link) fd.append('link',link);
+    try {
+      const r=await fetch(`/api/${currentAccount}/import`,{method:'POST',body:fd}).then(r=>r.json());
+      if(r.ok){ totalAdded+=r.added||0; totalSkipped+=(r.skipped||0); }
+      else errors.push(file.name+': '+(r.error||'erreur'));
+    } catch(e){ errors.push(file.name+': erreur réseau'); }
+  }
+
+  btn.disabled=false; btn.textContent='📤 Importer tous les fichiers';
+  let html=`<span class="badge badge-green">✓ ${totalAdded} contacts ajoutés`;
+  if(totalSkipped) html+=` · ${totalSkipped} doublons ignorés`;
+  html+=`${link?' 🔗 avec lien':''}</span>`;
+  if(errors.length) html+=`<div style="margin-top:6px;font-size:11px;color:var(--red)">${errors.join('<br>')}</div>`;
+  document.getElementById('import-result').innerHTML=html;
+  clearCSVFiles();
+}
+
+function updatePreview() {
+  const msg  = document.getElementById('import-message').value;
+  const link = document.getElementById('import-link').value.trim();
+  document.getElementById('msg-count').textContent = msg.length+' caractères';
+  const p = document.getElementById('msg-preview');
+  const preview = msg.replace(/\{prénom\}/gi,'Marie').replace(/\{nom\}/gi,'Dupont').replace(/\{prenom\}/gi,'Marie');
+  if (msg.trim()) { p.style.color='var(--text)'; p.textContent=preview; }
+  else { p.style.color='var(--muted)'; p.textContent='Votre message apparaîtra ici...'; }
+  const linkWrap = document.getElementById('link-preview-wrap');
+  const linkInfo = document.getElementById('link-info');
+  if (link) {
+    linkInfo.style.display='flex';
+    linkWrap.innerHTML = `<div class="link-preview-box">🔗 <a href="${link}" target="_blank" rel="noopener">${link}</a></div>`;
+  } else { linkInfo.style.display='none'; linkWrap.innerHTML=''; }
+}
+
+/* ═══════════════════════════════════════════════════
+   SETTINGS
+═══════════════════════════════════════════════════ */
+async function setLimit() {
+  const limit = parseInt(document.getElementById('limit-input').value);
+  if (!limit || limit < 1 || limit > 1000) return alert('Entrez une valeur entre 1 et 1000');
+  const r = await fetch(`/api/${currentAccount}/set-limit`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({limit})}).then(r=>r.json());
+  if (r.ok) { const el=document.getElementById('limit-saved'); el.style.display='inline'; setTimeout(()=>el.style.display='none',2000); }
+}
+
+async function loadSettings() {
+  try {
+    const cfg = await fetch('/api/config').then(r=>r.json());
+    document.getElementById('set-min-delay').value    = cfg.minDelay   || 90;
+    document.getElementById('set-max-delay').value    = cfg.maxDelay   || 180;
+    document.getElementById('set-session-size').value = cfg.sessionSize || 15;
+    document.getElementById('set-auto-resume').checked= cfg.autoResume !== false;
+  } catch(e){}
+}
+
+async function saveSettings() {
+  const body = {
+    minDelay:    parseInt(document.getElementById('set-min-delay').value),
+    maxDelay:    parseInt(document.getElementById('set-max-delay').value),
+    sessionSize: parseInt(document.getElementById('set-session-size').value),
+    autoResume:  document.getElementById('set-auto-resume').checked
+  };
+  const r = await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(r=>r.json());
+  if (r.ok) { const el=document.getElementById('settings-saved'); el.style.display='inline'; setTimeout(()=>el.style.display='none',2500); }
+}
+
+/* ═══════════════════════════════════════════════════
+   OVERVIEW
+═══════════════════════════════════════════════════ */
+async function renderOverview() {
+  const grid=document.getElementById('overview-grid');
+  grid.innerHTML='<div style="color:var(--muted);font-size:13px;padding:12px">Chargement...</div>';
+  const [r1,r2]=await Promise.all([fetch('/api/1/status').then(r=>r.json()).catch(()=>null),fetch('/api/2/status').then(r=>r.json()).catch(()=>null)]);
+  grid.innerHTML=[r1,r2].map((r,i)=>{
+    if(!r) return `<div class="card"><div class="card-title">Compte ${i+1}</div><span class="badge badge-red">Hors ligne</span></div>`;
+    const color=i===0?'var(--primary)':'var(--blue)';
+    const pct=r.total>0?Math.round((r.total-r.pending)/r.total*100):0;
+    const pctQ=r.dailyLimit>0?Math.min(100,Math.round(r.dailySent/r.dailyLimit*100)):0;
+    return `<div class="card"><div class="card-title" style="color:${color}">Compte ${i+1}</div>
+      <div style="display:flex;gap:20px;margin-bottom:12px">
+        <div><div class="stat-val green" style="font-size:22px">${r.stats.sent}</div><div class="stat-label">envoyés</div></div>
+        <div><div class="stat-val yellow" style="font-size:22px">${r.pending}</div><div class="stat-label">en attente</div></div>
+        <div><div class="stat-val" style="font-size:22px;color:${color}">${pct}%</div><div class="stat-label">complété</div></div>
+      </div>
+      <div style="font-size:12px;color:var(--muted);margin-bottom:4px">Quota : ${r.dailySent}/${r.dailyLimit} (${pctQ}%)</div>
+      <div class="quota-progress"><div class="quota-fill ${pctQ>=100?'full':pctQ>=70?'':'ok'}" style="width:${pctQ}%"></div></div>
+      <div style="font-size:11px;color:var(--muted);margin-top:5px">${r.ready?'🟢 Connecté':'🔴 Déconnecté'} · ${r.running&&!r.paused?'▶ En cours':r.paused?'⏸ Pause':r.limitReached?'⛔ Quota':'⏹ Arrêté'}${r.resetInMs>0?' · Reset dans '+formatCountdown(r.resetInMs):''}</div>
+    </div>`;
+  }).join('');
+}
+
+/* ═══════════════════════════════════════════════════
+   GROUPS
+═══════════════════════════════════════════════════ */
+async function loadGroups() {
+  const groups=await fetch(`/api/${currentAccount}/groups`).then(r=>r.json());
+  const tbody=document.getElementById('groups-table');
+  if(!groups.length){tbody.innerHTML='<tr><td colspan="3" style="color:var(--muted);text-align:center;padding:20px">Aucun groupe</td></tr>';return;}
+  tbody.innerHTML=groups.map(g=>`<tr><td><strong>${g.name}</strong></td><td>${g.count}</td><td><a href="/api/${currentAccount}/export-group/${encodeURIComponent(g.name)}" class="btn btn-ghost" style="padding:5px 11px;font-size:12px" target="_blank">Exporter</a></td></tr>`).join('');
+}
+
+/* ═══════════════════════════════════════════════════
+   INIT
+═══════════════════════════════════════════════════ */
+updateNotifUI();
+(function(){
+  const dt = document.getElementById('schedule-dt');
+  const d = new Date(); d.setDate(d.getDate()+1); d.setHours(9,0,0,0);
+  dt.value = d.toISOString().slice(0,16);
+})();
+
+fetchStatus();
+setInterval(fetchStatus, 2000);
+</script>
+</body>
+</html>
