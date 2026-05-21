@@ -679,7 +679,29 @@ async function sendTextViaWhatsAppStore(client, phoneDigits, text, logger, label
           if (r) { out.ok = true; out.via = r.name; out.id = r.id; return out; }
         }
 
+        if (typeof chat.sendMessage === 'function') {
+          const r = await attempt('chat.sendMessage', () => chat.sendMessage(msg));
+          if (r) { out.ok = true; out.via = r.name; out.id = r.id; return out; }
+        }
+
+        try {
+          const SendMessage = window.require('WAWebSendMessage');
+          if (SendMessage?.sendTextMsgToChat) {
+            const r = await attempt('WAWebSendMessage', () => SendMessage.sendTextMsgToChat(chat, msg));
+            if (r) { out.ok = true; out.via = r.name; out.id = r.id; return out; }
+          }
+        } catch (_) {}
+
+        try {
+          const Send2 = window.require('WAWebSendMsgChatAction').SendMessage;
+          if (Send2?.sendTextMsgToChat) {
+            const r = await attempt('SendMessage.sendTextMsgToChat', () => Send2.sendTextMsgToChat(chat, msg));
+            if (r) { out.ok = true; out.via = r.name; out.id = r.id; return out; }
+          }
+        } catch (_) {}
+
         out.err = 'no_send_module';
+        out.triesDetail = out.tries.slice(0, 8);
         return out;
       } catch (e) {
         out.err = e.message || String(e);
@@ -691,7 +713,8 @@ async function sendTextViaWhatsAppStore(client, phoneDigits, text, logger, label
   );
 
   if (!result?.ok || !result.id) {
-    if (logger) logger(`⚠️ Module WA (${label}) : ${result?.err || 'pas d\'id'}`, 'warn');
+    const detail = result?.triesDetail ? ` — ${JSON.stringify(result.triesDetail)}` : '';
+    if (logger) logger(`⚠️ Module WA (${label}) : ${result?.err || 'pas d\'id'}${detail}`, 'warn');
     return null;
   }
   if (logger) logger(`📤 Message via ${result.via} (${label})`, 'info');
@@ -1124,7 +1147,7 @@ async function sendSingleOutbound(client, chatId, text, label, logger, prefetche
     if (logger) logger(`✔️ Livré via saisie WhatsApp Web (${label})`, 'success');
     return uiFirst;
   }
-  if (wantUi && logger) logger(`⚠️ Saisie UI (${label}) non confirmée — essai API`, 'warn');
+  if (wantAlt && logger) logger(`⚠️ Saisie UI (${label}) non confirmée — essai API`, 'warn');
 
   try {
     return await sendAndVerify(client, chatId, text, label, logger, prefetchedChat, pn, opts);
