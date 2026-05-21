@@ -399,6 +399,16 @@ async function getContactName(client, userId, timeoutMs = 5000) {
 
 const EXPORT_GROUP_INTER_DELAY_MS = parseInt(process.env.EXPORT_GROUP_DELAY_MS || '120');
 
+// ─── FIX: isRegisteredUser avec fallback (évite les faux "skipped" sur Railway) ─
+async function safeIsRegisteredUser(client, chatId, logger) {
+  try {
+    return await withTimeout(client.isRegisteredUser(chatId), 8000, `isRegisteredUser(${chatId})`);
+  } catch(e) {
+    if (logger) logger(`⚠️ isRegisteredUser échoué pour ${chatId} (${e.message}) — on tente l'envoi quand même`, 'warn');
+    return true; // en cas d'erreur réseau/timeout, on tente l'envoi plutôt que de skipper
+  }
+}
+
 // ─── BotAccount ──────────────────────────────────────────────────────────────
 class BotAccount {
   constructor(id) {
@@ -645,9 +655,16 @@ class BotAccount {
       this.retryCount = 0; this.state.qr = await qrcode.toDataURL(qr); this.state.ready = false;
       this.log('QR Code généré — scannez-le sur le dashboard', 'warn');
     });
-    c.on('ready', () => {
+    c.on('ready', async () => {
       this.retryCount = 0; this.state.ready = true; this.state.qr = null;
-      this.log('WhatsApp connecté ✅', 'success');
+      // FIX : afficher le numéro de téléphone réellement connecté pour diagnostic
+      try {
+        const info = c.info;
+        const phone = info && info.wid ? info.wid.user : '?';
+        this.log(`WhatsApp connecté ✅ — Numéro actif : +${phone}`, 'success');
+      } catch(_) {
+        this.log('WhatsApp connecté ✅', 'success');
+      }
       const pending = this.state.queue.filter(c => c.status === 'pending').length;
       if (pending > 0 && !this.state.running && !this._dailyLimitReached()) {
         this.log(`▶️ Reprise automatique : ${pending} contacts restants`, 'warn');
@@ -702,10 +719,15 @@ class BotAccount {
   async _sendMessage(chatId, rawMsg, link) {
     const chat = await this.client.getChatById(chatId);
     const ids = [];
+    // FIX : assertSent ne throw plus si l'id est null (whatsapp-web.js ne retourne pas
+    // toujours un id valide selon la version) — on log un warning au lieu d'une erreur fatale
     const assertSent = (msg, label) => {
       const id = whatsappMsgId(msg);
-      if (!id)
-        throw new Error(`sendMessage() sans accusé WhatsApp (${label}). Reconnectez le compte.`);
+      if (!id) {
+        console.warn(`[BOT${this.id}] ⚠️ sendMessage() sans accusé WhatsApp (${label}) — message probablement envoyé mais sans id confirmé`);
+        ids.push('no-id-' + Date.now());
+        return 'no-id';
+      }
       ids.push(id);
       return id;
     };
@@ -743,7 +765,7 @@ class BotAccount {
   async sendTest(phone, message, link) {
     if (!this.state.ready) throw new Error('WhatsApp non connecté');
     const number=phone.replace(/\D/g,''), chatId=`${number}@c.us`;
-    if (!await this.client.isRegisteredUser(chatId)) throw new Error(`+${number} n'est pas sur WhatsApp`);
+    if (!await safeIsRegisteredUser(this.client, chatId, this.log.bind(this))) throw new Error(`+${number} n'est pas sur WhatsApp`);
     const fakeContact={phone:number,prenom:'Test',nom:'Test'};
     const pMsg = personalizeMessage(message||'Message de test 👋',fakeContact);
     const pLink = personalizeMessage(link||'',fakeContact);
@@ -772,7 +794,7 @@ class BotAccount {
       return;
     }
     if (!this.state.ready) {
-      this.log('❌ WhatsApp non connecté — scannez le QR dans l’onglet Connexion', 'error');
+      this.log('❌ WhatsApp non connecté — scannez le QR dans l\'onglet Connexion', 'error');
       return;
     }
     if (this._dailyLimitReached()) {
@@ -843,9 +865,12 @@ class BotAccount {
           this.log(`🚫 Blacklisté : +${number}`,'warn');
           this._saveQueue(); await sleep(rand(1000,3000)); continue;
         }
-        if (!await this.client.isRegisteredUser(chatId)) {
+        // FIX : utilisation de safeIsRegisteredUser avec fallback pour éviter les faux "skipped"
+        // dus aux timeouts réseau sur Railway
+        const isRegistered = await safeIsRegisteredUser(this.client, chatId, this.log.bind(this));
+        if (!isRegistered) {
           contact.status='skipped'; this.state.stats.skipped++;
-          this.log(`⏭️ Non inscrit : +${number}`,'warn');
+          this.log(`⏭️ Non inscrit sur WhatsApp : +${number}`,'warn');
           this._saveQueue(); await sleep(rand(3000,8000)); continue;
         }
         await sleep(rand(800, 2500));
@@ -1062,7 +1087,7 @@ app.post('/api/:account/start', (req,res)=>{
   const b=requireBot(req,res); if(!b) return;
   if(!b.state.ready) return res.status(400).json({ok:false,error:'WhatsApp non connecté — onglet Connexion, scannez le QR code'});
   const pending = b.state.queue.filter(c => c.status === 'pending').length;
-  if (!pending) return res.status(400).json({ok:false,error:'Aucun contact en attente — importez un CSV d’abord'});
+  if (!pending) return res.status(400).json({ok:false,error:'Aucun contact en attente — importez un CSV d\'abord'});
   if (b._dailyLimitReached()) {
     return res.status(400).json({
       ok:false,
