@@ -2234,6 +2234,7 @@ class BotAccount {
       );
     }
     this._pruneSendTimestamps();
+    const pendingWithDoubleMessage = pendingList.filter(c => !!(c.link || this.state.campaign?.link || '').trim()).length;
     return {
       id:this.id, ready:this.state.ready, qr:this.state.qr,
       running:this.state.running, paused:this.state.paused,
@@ -2241,7 +2242,7 @@ class BotAccount {
       resettingAuth: this._resettingAuth,
       sessionHealthy: this.state.sessionHealthy,
       lastInitError: this._lastInitError,
-      waWebCacheType: (process.env.WA_WEB_CACHE_TYPE || 'remote').toLowerCase(),
+      waWebCacheType: (this._effectiveCacheType || process.env.WA_WEB_CACHE_TYPE || 'remote').toLowerCase(),
       waWebVersion: WA_WEB_VERSION,
       stats:this.state.stats,
       pending: pendingList.length, pendingWhatsAppMessages, pendingWithDoubleMessage,
@@ -2359,7 +2360,16 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-app.get('/api/:account/status', (req,res)=>{ const b=requireBot(req,res); if(!b) return; res.json(b.getStatus()); });
+app.get('/api/:account/status', (req, res) => {
+  const b = requireBot(req, res);
+  if (!b) return;
+  try {
+    res.json(b.getStatus());
+  } catch (e) {
+    console.error(`[API] getStatus bot${b.id}:`, e.message);
+    res.status(500).json({ ok: false, id: b.id, error: e.message, log: b.state.log.slice(0, 20) });
+  }
+});
 
 app.post('/api/:account/start', (req,res)=>{
   const b=requireBot(req,res); if(!b) return;
@@ -2665,7 +2675,12 @@ app.get('/api/:account/export-group/:name', async (req, res) => {
 });
 
 // ─── Routes legacy (Compte 1 uniquement) ─────────────────────────────────────
-app.get('/api/status',(req,res)=>res.json(bots[1].getStatus()));
+app.get('/api/status', (req, res) => {
+  const b = bots[1];
+  if (!b) return res.status(503).json({ ok: false, error: 'Compte 1 désactivé (ENABLED_ACCOUNTS)' });
+  try { res.json(b.getStatus()); }
+  catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
 app.post('/api/start',(req,res)=>{
   if(!bots[1].state.ready) return res.status(400).json({ok:false,error:'Non connecté'});
   bots[1].state.paused=false; bots[1].state.limitReached=false; bots[1].state.bannedAt=null;

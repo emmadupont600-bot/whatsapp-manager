@@ -1503,11 +1503,17 @@ async function checkSession() {
 async function fetchStatus() {
   try {
     const res = await fetch(`/api/${currentAccount}/status`);
-    const r = await res.json();
-    if (!res.ok && r.error) showApiError(r.error);
+    const text = await res.text();
+    let r;
+    try { r = JSON.parse(text); } catch (_) {
+      showApiError(`Réponse invalide (${res.status}) — redeploy en cours ?`);
+      return;
+    }
+    if (!res.ok) showApiError(r.error || `Erreur API ${res.status}`);
+    else showApiError('');
     applyStatus(r);
   } catch(e) {
-    showApiError('Impossible de joindre /api/status — serveur arrêté ?');
+    showApiError('Impossible de joindre /api/status — serveur arrêté ou URL incorrecte');
   }
   const other = currentAccount === 1 ? 2 : 1;
   try {
