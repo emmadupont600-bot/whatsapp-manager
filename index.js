@@ -2688,11 +2688,19 @@ app.post('/api/config', (req, res) => {
 
 app.get('/api/:account/groups', async (req,res)=>{
   const bot=requireBot(req,res); if(!bot) return;
-  if(!bot.state.ready) return res.json([]);
+  if(!bot.state.ready) {
+    return res.status(400).json({
+      ok: false,
+      error: `Compte ${bot.id} non connecté — scannez le QR (onglet Connexion)`,
+      groups: [],
+    });
+  }
   try {
     const chats=await bot.client.getChats();
-    res.json(chats.filter(c=>c.isGroup).map(c=>({name:c.name,count:c.participants?.length||0})));
-  } catch(e) { res.status(500).json({ok:false,error:'Erreur récupération groupes : ' + e.message}); }
+    const groups = chats.filter(c=>c.isGroup).map(c=>({name:c.name,count:c.participants?.length||0}));
+    groups.sort((a, b) => (a.name || '').localeCompare(b.name || '', 'fr'));
+    res.json(groups);
+  } catch(e) { res.status(500).json({ok:false,error:'Erreur récupération groupes : ' + e.message, groups:[]}); }
 });
 
 app.get('/api/:account/export-group/:name', async (req, res) => {
