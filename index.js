@@ -22,6 +22,47 @@ function getAuthBase() {
   return process.env.AUTH_PATH || __dirname;
 }
 
+function resolveChromiumPath() {
+  const candidates = [
+    process.env.PUPPETEER_EXECUTABLE_PATH,
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
+    '/usr/bin/google-chrome-stable',
+  ].filter(Boolean);
+  for (const p of candidates) {
+    try { if (fs.existsSync(p)) return p; } catch (_) {}
+  }
+  return process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium';
+}
+
+function ensureDataDirs() {
+  const base = getAuthBase();
+  for (const d of [
+    path.join(__dirname, 'data'),
+    path.join(__dirname, 'uploads'),
+    path.join(__dirname, 'exports'),
+    path.join(base, '.wwebjs_auth'),
+    path.join(base, '.wwebjs_cache'),
+  ]) {
+    try { if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true }); } catch (e) {
+      console.error(`[BOOT] mkdir ${d}: ${e.message}`);
+    }
+  }
+}
+
+function parseEnabledAccounts() {
+  const v = (process.env.ENABLED_ACCOUNTS || '1,2').trim();
+  const ids = new Set();
+  for (const part of v.split(',')) {
+    const n = parseInt(part.trim(), 10);
+    if (n === 1 || n === 2) ids.add(n);
+  }
+  return ids.size ? ids : new Set([1, 2]);
+}
+const ENABLED_ACCOUNTS = parseEnabledAccounts();
+const CHROMIUM_PATH = resolveChromiumPath();
+ensureDataDirs();
+
 function parseResetAuthOnStart() {
   const v = (process.env.RESET_AUTH || '').trim();
   if (!v || v === '0' || v === 'false') return new Set();
@@ -1252,6 +1293,9 @@ class BotAccount {
     this._postReadyScheduled = false;
     this._qrWatchdogTimer = null;
     this._lastInitError = null;
+    this._effectiveCacheType = null;
+    this._triedCacheFallback = false;
+    this.bootAt = new Date().toISOString();
     this.state = {
       qr: null, ready: false, running: false, paused: false, sessionHealthy: null,
       queue: [], sessionCount: 0,
@@ -1264,14 +1308,19 @@ class BotAccount {
       log: loadLogs(id),
       stats: { sent: 0, failed: 0, skipped: 0, blacklisted: 0 }
     };
+    this.log(`🚀 Compte ${id} — initialisation (auth: ${this.authPath})`, 'info');
+    this.log(`🌐 Chromium: ${CHROMIUM_PATH} (${fs.existsSync(CHROMIUM_PATH) ? 'OK' : 'INTROUVABLE'})`, fs.existsSync(CHROMIUM_PATH) ? 'info' : 'error');
     this._loadQueue();
     this._autoResume();
     if (RESET_AUTH_ON_START.has(id)) {
       rmrf(this.authPath);
       console.log(`[BOT${id}] 🗑️ RESET_AUTH au démarrage — session supprimée : ${this.authPath}`);
     }
-    const stagger = id === 2 ? parseInt(process.env.BOT2_START_DELAY_MS || '10000', 10) : 0;
-    setTimeout(() => this._initClient().catch(() => {}), stagger);
+    const stagger = id === 2 ? parseInt(process.env.BOT2_START_DELAY_MS || '60000', 10) : 0;
+    if (stagger > 0) this.log(`⏳ Démarrage WhatsApp dans ${Math.round(stagger / 1000)}s (évite 2 Chrome en même temps)`, 'info');
+    setTimeout(() => {
+      this._initClient().catch(e => this.log(`❌ Init fatal : ${e.message}`, 'error'));
+    }, stagger);
   }
 
   get dailyLimit() { return dailyLimitMap[this.id]; }
@@ -1501,7 +1550,7 @@ class BotAccount {
 
   _makeClient() {
     const takeover = process.env.TAKEOVER_ON_CONFLICT === '1';
-    const cacheType = (process.env.WA_WEB_CACHE_TYPE || 'remote').toLowerCase();
+    const cacheType = (this._effectiveCacheType || process.env.WA_WEB_CACHE_TYPE || 'remote').toLowerCase();
     let webVersionCache = { type: 'none' };
     const clientExtra = {};
     if (cacheType === 'remote') {
@@ -1511,6 +1560,7 @@ class BotAccount {
       webVersionCache = { type: 'local' };
       clientExtra.webVersion = WA_WEB_VERSION;
     }
+    this.log(`🔧 Client WA — cache=${cacheType} version=${cacheType !== 'none' ? WA_WEB_VERSION : 'auto'}`, 'info');
     return new Client({
       authStrategy: new LocalAuth({ dataPath: this.authPath }),
       ...clientExtra,
@@ -1519,7 +1569,7 @@ class BotAccount {
       takeoverTimeoutMs: takeover ? 10000 : 0,
       puppeteer: {
         headless: true,
-        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium',
+        executablePath: CHROMIUM_PATH,
         timeout: 120000, protocolTimeout: 120000,
         args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage',
           '--disable-gpu','--no-first-run','--no-zygote',
@@ -1629,6 +1679,7 @@ class BotAccount {
     if (this._initializing || this._resettingAuth) return;
     this._initializing = true;
     this._clearQrWatchdog();
+    this.log('📲 Connexion WhatsApp Web en cours...', 'info');
     try {
       await this._destroyClient();
       removeLocks(this.authPath);
@@ -1637,11 +1688,26 @@ class BotAccount {
       await withTimeout(this.client.initialize(), 180000, 'WhatsApp.initialize()');
       this.retryCount = 0;
       this._lastInitError = null;
-      if (!this.state.ready && !this.state.qr) this._scheduleQrWatchdog();
+      if (!this.state.ready && !this.state.qr) {
+        this.log('⏳ Session en attente — QR ou reconnexion automatique sous peu', 'warn');
+        this._scheduleQrWatchdog();
+      }
     } catch (err) {
       const msg = err.message || String(err);
       this._lastInitError = msg;
       const nav = isPuppeteerNavigationError(msg);
+      const cacheType = (this._effectiveCacheType || process.env.WA_WEB_CACHE_TYPE || 'remote').toLowerCase();
+      if (!this._triedCacheFallback && cacheType === 'remote') {
+        this._triedCacheFallback = true;
+        this._effectiveCacheType = 'none';
+        this.log('⚠️ Échec cache remote — nouvel essai sans version épinglée', 'warn');
+        await this._destroyClient();
+        this._initializing = false;
+        return this._initClient();
+      }
+      if (!fs.existsSync(CHROMIUM_PATH)) {
+        this.log(`❌ Chromium introuvable (${CHROMIUM_PATH}) — vérifiez le Dockerfile Railway`, 'error');
+      }
       this.log(`Erreur initialisation : ${msg}${nav ? ' (rechargement WA Web — nouvelle tentative)' : ''}`, 'error');
       await this._destroyClient();
       this._scheduleRetry(nav ? 30000 : 15000);
@@ -2231,10 +2297,19 @@ class BotAccount {
   clearLogs() { this.state.log = []; saveLogs(this.id, []); console.log(`[BOT${this.id}] Logs effacés`); }
 }
 
-// ─── Deux comptes ─────────────────────────────────────────────────────────────
-const bots={1:new BotAccount(1),2:new BotAccount(2)};
-bots[1]._partner = bots[2];
-bots[2]._partner = bots[1];
+// ─── Comptes actifs ───────────────────────────────────────────────────────────
+const bots = {};
+if (ENABLED_ACCOUNTS.has(1)) bots[1] = new BotAccount(1);
+if (ENABLED_ACCOUNTS.has(2)) bots[2] = new BotAccount(2);
+if (bots[1] && bots[2]) {
+  bots[1]._partner = bots[2];
+  bots[2]._partner = bots[1];
+} else if (bots[1]) {
+  bots[1]._partner = bots[1];
+} else if (bots[2]) {
+  bots[2]._partner = bots[2];
+}
+console.log(`[BOOT] Comptes actifs : ${Object.keys(bots).join(', ') || 'aucun'} · Chromium=${CHROMIUM_PATH} · exists=${fs.existsSync(CHROMIUM_PATH)}`);
 
 function getBot(req) {
   const id = parseInt(req.params.account || req.query.account || '');
@@ -2245,17 +2320,42 @@ function requireBot(req, res) {
   if (!bot) { res.status(404).json({ ok: false, error: `Compte invalide. Comptes disponibles : ${Object.keys(bots).join(', ')}` }); return null; }
   return bot;
 }
-function otherBot(bot){return bot.id===1?bots[2]:bots[1];}
+function otherBot(bot) {
+  if (bot.id === 1 && bots[2]) return bots[2];
+  if (bot.id === 2 && bots[1]) return bots[1];
+  return bot;
+}
 
 // ─── Routes API ───────────────────────────────────────────────────────────────
 app.get('/api/health', (req, res) => {
+  const botDiag = {};
+  for (const [id, b] of Object.entries(bots)) {
+    botDiag[id] = {
+      ready: b.state.ready,
+      hasQr: !!b.state.qr,
+      initializing: b._initializing,
+      resettingAuth: b._resettingAuth,
+      sessionHealthy: b.state.sessionHealthy,
+      lastInitError: b._lastInitError,
+      cacheType: b._effectiveCacheType || process.env.WA_WEB_CACHE_TYPE || 'remote',
+      logCount: b.state.log.length,
+      lastLog: b.state.log[0] ? b.state.log[0].msg : null,
+      bootAt: b.bootAt,
+    };
+  }
   res.json({
     ok: true,
     version: APP_VERSION,
     commit: BUILD_COMMIT,
+    authTokenRequired: !!AUTH_TOKEN,
+    chromiumPath: CHROMIUM_PATH,
+    chromiumExists: fs.existsSync(CHROMIUM_PATH),
+    authBase: getAuthBase(),
+    enabledAccounts: [...ENABLED_ACCOUNTS],
     features: { resetAuth: true, ghostDetection: true, messageAck: true, optInLinkFlow: true, coldContactSync: true, manualSearchFlow: MANUAL_SEARCH_FLOW, coldOpener: !!getColdOpenerText(), aiSpin: true, storeSend: true },
     resetAuthOnStart: [...RESET_AUTH_ON_START],
     uptimeSec: Math.round(process.uptime()),
+    bots: botDiag,
   });
 });
 
@@ -2602,5 +2702,7 @@ app.use((req, res) => {
 app.listen(PORT, () => {
   console.log(`WhatsApp Manager → http://localhost:${PORT}`);
   console.log(`[BUILD] v${APP_VERSION} commit=${BUILD_COMMIT} reset-auth=ok`);
+  console.log(`[BOOT] chromium=${CHROMIUM_PATH} exists=${fs.existsSync(CHROMIUM_PATH)} authToken=${AUTH_TOKEN ? 'oui' : 'non'}`);
   if (RESET_AUTH_ON_START.size) console.log(`[RESET_AUTH] Comptes au démarrage : ${[...RESET_AUTH_ON_START].join(', ')}`);
+  if (AUTH_TOKEN) console.log('[BOOT] ⚠️ AUTH_TOKEN actif — le dashboard doit envoyer Authorization: Bearer …');
 });

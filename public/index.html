@@ -152,6 +152,8 @@ tr:hover td{background:var(--surface2)}
 </head>
 <body>
 
+<div id="api-error-banner" style="display:none;position:fixed;top:0;left:0;right:0;z-index:9999;background:color-mix(in oklch,var(--red) 15%,var(--surface));border-bottom:1px solid var(--red);padding:10px 16px;font-size:13px;color:var(--text)"></div>
+
 <!-- Notification banner -->
 <div class="notif-banner" id="notif-banner">
   <span class="notif-icon" id="notif-icon">🔔</span>
@@ -587,6 +589,10 @@ tr:hover td{background:var(--surface2)}
           </div>
         </div>
       </div>
+      <div class="card" style="margin-top:16px">
+        <div class="card-title">Journal connexion</div>
+        <div class="log-wrap" id="conn-log" style="max-height:220px"></div>
+      </div>
     </div>
 
     <!-- ─── PARAMÈTRES ───────────────────────────────── -->
@@ -620,6 +626,16 @@ tr:hover td{background:var(--surface2)}
         <span id="settings-saved" style="font-size:12px;color:var(--green);margin-left:10px;display:none">✓ Sauvegardé</span>
       </div>
       <div class="card">
+        <div class="card-title">Sécurité API (Railway)</div>
+        <p style="font-size:13px;color:var(--muted);margin-bottom:10px">Si la variable <code>AUTH_TOKEN</code> est définie sur Railway, collez la même valeur ici — sinon le dashboard reste vide (401).</p>
+        <div class="form-group">
+          <label>Token API (Bearer)</label>
+          <input type="password" id="set-api-token" placeholder="Identique à AUTH_TOKEN Railway" autocomplete="off">
+        </div>
+        <button class="btn btn-ghost" type="button" onclick="saveApiToken()">💾 Enregistrer le token</button>
+        <span id="api-token-saved" style="font-size:12px;color:var(--green);margin-left:8px;display:none">✓ OK</span>
+      </div>
+      <div class="card">
         <div class="card-title">Notifications navigateur</div>
         <p style="font-size:13px;color:var(--muted);margin-bottom:12px">Reçois une notification quand la queue se termine ou que le quota est atteint — même si l'onglet est en arrière-plan.</p>
         <button class="btn btn-ghost" id="notif-perm-btn" onclick="requestNotifPermission()">🔔 Activer les notifications</button>
@@ -646,6 +662,66 @@ tr:hover td{background:var(--surface2)}
 </div>
 
 <script>
+const _nativeFetch = window.fetch.bind(window);
+function apiHeaders(extra = {}) {
+  const h = { ...extra };
+  const t = localStorage.getItem('wa_api_token');
+  if (t) h['Authorization'] = 'Bearer ' + t;
+  return h;
+}
+window.fetch = function(url, opts = {}) {
+  if (typeof url === 'string' && url.startsWith('/api')) {
+    opts.headers = { ...apiHeaders(), ...(opts.headers || {}) };
+  }
+  return _nativeFetch(url, opts);
+};
+
+function showApiError(msg) {
+  const el = document.getElementById('api-error-banner');
+  if (!el) return;
+  if (!msg) { el.style.display = 'none'; el.textContent = ''; return; }
+  el.style.display = 'block';
+  el.innerHTML = `⚠️ <strong>API :</strong> ${escapeHtml(msg)} — vérifiez le token dans Paramètres ou les logs Railway.`;
+}
+
+function saveApiToken() {
+  const v = (document.getElementById('set-api-token')?.value || '').trim();
+  if (v) localStorage.setItem('wa_api_token', v);
+  else localStorage.removeItem('wa_api_token');
+  const s = document.getElementById('api-token-saved');
+  if (s) { s.style.display = 'inline'; setTimeout(() => { s.style.display = 'none'; }, 2000); }
+  fetchStatus();
+  checkHealth();
+}
+
+function paintLogs(r) {
+  const logs = Array.isArray(r?.log) ? r.log : [];
+  const html = logs.length
+    ? logs.map(l => {
+        const t = new Date(l.time).toLocaleTimeString('fr-FR');
+        return `<div class="log-item"><span class="log-time">${t}</span><span class="log-${l.type}">${escapeHtml(l.msg)}</span></div>`;
+      }).join('')
+    : '<div class="log-item" style="color:var(--muted)"><span class="log-time">—</span> Aucun événement — attendez 30s ou cliquez Nouveau QR</div>';
+  const logEl = document.getElementById('log');
+  if (logEl) logEl.innerHTML = html;
+  const connLog = document.getElementById('conn-log');
+  if (connLog) connLog.innerHTML = html;
+}
+
+async function checkHealth() {
+  try {
+    const h = await fetch('/api/health').then(r => r.json());
+    if (h.authTokenRequired && !localStorage.getItem('wa_api_token')) {
+      showApiError('AUTH_TOKEN requis — renseignez le token dans Paramètres');
+    } else if (!h.chromiumExists) {
+      showApiError(`Chromium introuvable (${h.chromiumPath}) — rebuild Docker`);
+    } else {
+      showApiError('');
+    }
+  } catch (e) {
+    showApiError('Serveur injoignable — déploiement Railway en cours ?');
+  }
+}
 
   /* ═══════════════════════════════════════════════════
    HISTORIQUE GLOBAL
@@ -1211,9 +1287,15 @@ function statusBadge(s) {
    STATUS POLLING
 ═══════════════════════════════════════════════════ */
 function applyStatus(r) {
+  if (!r || (r.error && r.id == null && r.ok === false)) {
+    showApiError(r?.error || 'Réponse API invalide (401 token ?)');
+    return;
+  }
+  showApiError('');
   const acct = r.id || currentAccount;
   const prev = lastStatus[acct] || {};
   lastStatus[acct] = r;
+  paintLogs(r);
 
   if (prev.running && !r.running && !r.paused && r.pending === 0 && r.total > 0) {
     fireNotification('✅ Queue terminée', `Compte ${acct} — ${r.stats.sent} messages envoyés.`, '✅', `queue-done-${acct}`);
@@ -1325,10 +1407,6 @@ function applyStatus(r) {
     statEta.textContent=r.total>0?'✅':'—'; etaLabel.textContent=r.total>0?'terminé':'aucun contact'; etaBox.style.display='none';
   }
 
-  document.getElementById('log').innerHTML = r.log.map(l=>{
-    const t=new Date(l.time).toLocaleTimeString('fr-FR');
-    return `<div class="log-item"><span class="log-time">${t}</span><span class="log-${l.type}">${l.msg}</span></div>`;
-  }).join('');
 }
 
 function escapeHtml(s) {
@@ -1424,9 +1502,13 @@ async function checkSession() {
 }
 async function fetchStatus() {
   try {
-    const r = await fetch(`/api/${currentAccount}/status`).then(res => res.json());
+    const res = await fetch(`/api/${currentAccount}/status`);
+    const r = await res.json();
+    if (!res.ok && r.error) showApiError(r.error);
     applyStatus(r);
-  } catch(e) {}
+  } catch(e) {
+    showApiError('Impossible de joindre /api/status — serveur arrêté ?');
+  }
   const other = currentAccount === 1 ? 2 : 1;
   try {
     const r = await fetch(`/api/${other}/status`).then(res => res.json());
@@ -2150,6 +2232,11 @@ loadQuotaDisplayPref();
   dt.value = d.toISOString().slice(0,16);
 })();
 
+(function initApiTokenField() {
+  const inp = document.getElementById('set-api-token');
+  if (inp) inp.value = localStorage.getItem('wa_api_token') || '';
+})();
+checkHealth();
 fetchStatus();
 setInterval(fetchStatus, 2000);
 </script>
