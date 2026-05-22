@@ -390,13 +390,14 @@ function countOutboundMessages(rawMsg) {
   return (rawMsg || '').trim() ? 1 : 0;
 }
 
-function personalizeMessage(template) {
+function personalizeMessage(template, contact = {}) {
   if (!template) return template;
+  const c = contact || {};
   return template
-    .replace(/\{pr[eé]nom\}/gi, contact.prenom || contact.nom || '')
-    .replace(/\{nom\}/gi,       contact.nom    || contact.prenom || '')
-    .replace(/\{name\}/gi,      contact.prenom || contact.nom || '')
-    .replace(/\{phone\}/gi,     contact.phone  || '')
+    .replace(/\{pr[eé]nom\}/gi, c.prenom || c.nom || '')
+    .replace(/\{nom\}/gi,       c.nom    || c.prenom || '')
+    .replace(/\{name\}/gi,      c.prenom || c.nom || '')
+    .replace(/\{phone\}/gi,     c.phone  || '')
     .trim();
 }
 
