@@ -7,6 +7,8 @@ const fs       = require('fs');
 const path     = require('path');
 const csv      = require('csv-parse/sync');
 const { stringify } = require('csv-stringify/sync');
+const ai = require('./lib/ai');
+const { isPositiveReply, isNegativeReply, isPositiveReaction } = require('./lib/replies');
 
 process.on('unhandledRejection', (reason) => console.error('[FATAL] Unhandled rejection:', reason));
 process.on('uncaughtException',  (err)    => console.error('[FATAL] Uncaught exception:',  err));
@@ -324,14 +326,11 @@ function useSplitLinkMessages() {
   return process.env.SPLIT_LINK_MESSAGE === '1';
 }
 
-/** Par défaut : 1 seul message (texte + lien), comme le test. SPLIT_LINK_MESSAGE=1 pour 2 messages séparés. */
+/** Texte et lien toujours séparés — le lien part après opt-in (réponse positive). */
 function prepareOutboundContent(rawMsg, link) {
   const text = (rawMsg || '').trim();
   const lnk = (link || '').trim();
-  if (useSplitLinkMessages()) return { rawMsg: text, link: lnk, combined: false };
-  if (lnk && text) return { rawMsg: `${text}\n\n${lnk}`, link: '', combined: true };
-  if (lnk && !text) return { rawMsg: lnk, link: '', combined: true };
-  return { rawMsg: text, link: '', combined: false };
+  return { rawMsg: text, link: lnk, combined: false };
 }
 
 function splitMessageAndLink(msg) {
@@ -343,19 +342,11 @@ function splitMessageAndLink(msg) {
   return { text: [before, after].filter(Boolean).join('\n').trim(), url };
 }
 
-function countOutboundMessages(rawMsg, link) {
-  const { rawMsg: body, link: outLink } = prepareOutboundContent(rawMsg, link);
-  const text = (body || '').trim();
-  const separateLink = useSplitLinkMessages() && !!(outLink && outLink.trim());
-  if (separateLink && text) return 2;
-  if (separateLink && !text) return 1;
-  if (!useSplitLinkMessages()) return text ? 1 : 0;
-  const parts = splitMessageAndLink(text);
-  if (parts) return parts.text ? 2 : 1;
-  return text ? 1 : 0;
+function countOutboundMessages(rawMsg) {
+  return (rawMsg || '').trim() ? 1 : 0;
 }
 
-function personalizeMessage(template, contact) {
+function personalizeMessage(template) {
   if (!template) return template;
   return template
     .replace(/\{pr[eé]nom\}/gi, contact.prenom || contact.nom || '')
@@ -1315,6 +1306,8 @@ class BotAccount {
         limitReached: this.state.limitReached, limitReachedAt: this.state.limitReachedAt,
         resumeAt: this.state.resumeAt, bannedAt: this.state.bannedAt,
         repliesReceived: this.state.repliesReceived,
+        campaign: this.state.campaign || null,
+        spinUsed: this.state.spinUsed || [],
         savedAt: new Date().toISOString()
       }, null, 2));
     } catch(e) { console.error(`[BOT${this.id}] Erreur écriture queue : ${e.message}`); }
@@ -1335,6 +1328,8 @@ class BotAccount {
         this.state.resumeAt       = data.resumeAt       || null;
         this.state.bannedAt       = data.bannedAt       || null;
         this.state.repliesReceived= data.repliesReceived|| 0;
+        this.state.campaign = data.campaign || null;
+        this.state.spinUsed = data.spinUsed || [];
         this._checkWindowReset();
         const pending = this.state.queue.filter(c => c.status === 'pending').length;
         if (pending) this.log(`💾 Queue restaurée : ${pending} contacts en attente`, 'warn');
@@ -1436,11 +1431,9 @@ class BotAccount {
     let sec = 0;
     for (const c of pending) {
       const rawMsg = personalizeMessage((c.message || '').trim() || process.env.DEFAULT_MESSAGE || '', c);
-      const link = personalizeMessage((c.link || '').trim(), c);
-      const mc = countOutboundMessages(rawMsg, link);
+      const mc = countOutboundMessages(rawMsg);
       const base = (config.minDelay + config.maxDelay) / 2;
       sec += mc * base;
-      if (mc >= 2) sec += (config.linkDelayMin + config.linkDelayMax) / 2000;
     }
     const sessions = Math.max(0, Math.floor(pending.length / Math.max(config.sessionSize, 1)));
     sec += sessions * ((config.sessionPauseMin + config.sessionPauseMax) / 2);
@@ -1540,15 +1533,25 @@ class BotAccount {
       this._schedulePostReadyCheck().catch(e => this.log(`Erreur probe ready : ${e.message}`, 'error'));
     });
     c.on('message', async msg => {
-      if (msg.fromMe) return;
-      const phone = msg.from.replace('@c.us','').replace(/\D/g,'');
-      const contact = this.state.queue.find(x => x.phone.replace(/\D/g,'') === phone);
-      if (contact && contact.status === 'done') {
-        contact.replied = true; contact.repliedAt = new Date().toISOString();
-        contact.replyText = msg.body ? msg.body.substring(0, 200) : '(media)';
-        this.state.repliesReceived++;
-        this.log(`💬 Réponse reçue de +${phone} : "${contact.replyText}"`, 'success');
-        this._saveQueue();
+      try { await this._handleInboundMessage(msg); } catch (e) {
+        console.error(`[BOT${this.id}] message:`, e.message);
+      }
+    });
+    c.on('message_reaction', async reaction => {
+      try {
+        if (!reaction) return;
+        const phone = String(reaction.senderId || '').replace('@c.us', '').replace(/\D/g, '');
+        if (!phone) return;
+        const contact = this.state.queue.find(x => x.phone.replace(/\D/g, '') === phone);
+        if (!contact || contact.linkSent) return;
+        if (!(contact.status === 'awaiting_reply' || contact.awaitingLink)) return;
+        if (!isPositiveReaction(reaction)) return;
+        this.log(`👍 Réaction positive de +${phone} — envoi du lien`, 'success');
+        contact.replied = true;
+        contact.replyText = reaction.reaction || '👍';
+        await this._sendPendingLink(contact, phone);
+      } catch (e) {
+        console.error(`[BOT${this.id}] reaction:`, e.message);
       }
     });
     c.on('disconnected', reason => {
@@ -1634,8 +1637,111 @@ class BotAccount {
   async _delaySession() { const ms=rand(config.sessionPauseMin,config.sessionPauseMax)*1000; this.log(`☕ Pause session : ${(ms/60000).toFixed(0)}min`,'warn'); await sleep(ms); }
   async _typing(chat)   { try { await chat.sendStateTyping(); await sleep(rand(config.typingMin,config.typingMax)); await chat.clearState(); } catch(e) {} }
 
+
+  _campaignUsesAiSpin() {
+    const c = this.state.campaign;
+    if (c && c.aiSpin === false) return false;
+    if (c && c.aiSpin === true) return ai.isAiEnabled();
+    return ai.isAiEnabled() && process.env.AI_SPIN !== '0';
+  }
+
+  async _resolveContactMessage(contact, sendIndex) {
+    const toSend = (contact.message || '').trim();
+    const spinBase = (contact.messageOriginal || contact.message || '').trim();
+    if (!toSend && !spinBase) return '';
+    if (sendIndex === 0 || !this._campaignUsesAiSpin()) {
+      return personalizeMessage(toSend || spinBase, contact);
+    }
+    if (!ai.isAiEnabled()) return personalizeMessage(toSend || spinBase, contact);
+    try {
+      const spun = await ai.spinMessage(spinBase, {
+        prenom: contact.prenom,
+        index: sendIndex,
+        previousSpins: this.state.spinUsed || [],
+      });
+      if (!this.state.spinUsed) this.state.spinUsed = [];
+      this.state.spinUsed.push(spun);
+      if (this.state.spinUsed.length > 200) this.state.spinUsed = this.state.spinUsed.slice(-200);
+      this.log(`🤖 Spin IA #${sendIndex + 1} (Groq) pour +${contact.phone.replace(/\D/g, '')}`, 'info');
+      return personalizeMessage(spun, contact);
+    } catch (e) {
+      this.log(`⚠️ Spin IA : ${e.message} — texte original`, 'warn');
+      return personalizeMessage(toSend || spinBase, contact);
+    }
+  }
+
+  async _sendPendingLink(contact, phoneDigits) {
+    const link = (contact.link || '').trim();
+    if (!link || contact.linkSent) return false;
+    const number = phoneDigits.replace(/\D/g, '');
+    const cusChatId = normalizeOutboundChatId(`${number}@c.us`, number);
+    const personalizedLink = personalizeMessage(link, contact);
+    if (!(await this._waitForHourlyCapacity(1))) return false;
+    if (this._dailyLimitReached()) return false;
+    await resolveOutboundChatId(this.client, number, this.log.bind(this));
+    const sendOpts = { coldContact: false };
+    const linkResult = await this._sendMessage(cusChatId, personalizedLink, '', null, sendOpts);
+    contact.linkSent = true;
+    contact.linkSentAt = new Date().toISOString();
+    contact.status = 'done';
+    contact.awaitingLink = false;
+    this.state.dailySent += linkResult.messageCount;
+    this._recordMessagesSent(linkResult.messageCount);
+    this._saveQueue(true);
+    addToSentHistory(number, {
+      sentAt: contact.linkSentAt, botId: this.id,
+      message: '(lien après opt-in)', link: personalizedLink,
+      prenom: contact.prenom, nom: contact.nom,
+    });
+    this.log(`🔗 Lien envoyé à +${number} après réponse positive`, 'success');
+    return true;
+  }
+
+  async _handleInboundMessage(msg) {
+    if (msg.fromMe) return;
+    const phone = msg.from.replace('@c.us', '').replace(/\D/g, '');
+    const body = msg.body ? msg.body.substring(0, 500) : '';
+    const contact = this.state.queue.find(x => x.phone.replace(/\D/g, '') === phone);
+    if (!contact) return;
+    const awaiting = contact.status === 'awaiting_reply' || (contact.awaitingLink && !contact.linkSent);
+    if (awaiting && body) {
+      contact.replied = true;
+      contact.repliedAt = new Date().toISOString();
+      contact.replyText = body.substring(0, 200);
+      this.state.repliesReceived++;
+      this._saveQueue();
+      if (isNegativeReply(body)) {
+        contact.status = 'declined';
+        contact.awaitingLink = false;
+        this._saveQueue(true);
+        this.log(`👎 Réponse négative de +${phone} — pas de lien`, 'warn');
+        return;
+      }
+      if (isPositiveReply(body)) {
+        this.log(`👍 Réponse positive de +${phone} — envoi du lien`, 'success');
+        try { await this._sendPendingLink(contact, phone); } catch (e) {
+          this.log(`❌ Lien non envoyé à +${phone} : ${e.message}`, 'error');
+        }
+        return;
+      }
+      this.log(`💬 Réponse de +${phone} (non positive) : "${contact.replyText}"`, 'info');
+      return;
+    }
+    if (contact.status === 'done') {
+      contact.replied = true;
+      contact.repliedAt = new Date().toISOString();
+      contact.replyText = body ? body.substring(0, 200) : '(media)';
+      this.state.repliesReceived++;
+      this.log(`💬 Réponse de +${phone} : "${contact.replyText}"`, 'success');
+      this._saveQueue();
+    }
+  }
+
   async _sendMessage(chatId, rawMsg, link, prefetchedChat = null, opts = {}) {
-    const ids  = [];
+    void link;
+    const text = (rawMsg || '').trim();
+    if (!text) throw new Error('Message vide');
+    const ids = [];
     let chat = prefetchedChat;
     if (!chat) {
       try { chat = await getChat(this.client, chatId, this.log.bind(this)); } catch (e) {
@@ -1643,59 +1749,26 @@ class BotAccount {
       }
     }
     const ackSoft = !!((opts.coldContact || opts.manualOpener) && useAckColdSoft());
-    const doSend = async (text, label, useTypingChat, extra = {}) => {
-      const pn = chatId.split('@')[0].replace(/\D/g, '');
-      const sendLabel = (extra.viaUi || useUiSendAll()) ? `${label}-ui` : label;
-      const result = await sendSingleOutbound(
-        this.client, chatId, text, sendLabel, this.log.bind(this), useTypingChat,
-        {
-          ackSoft,
-          viaUi: !!(extra.viaUi || useUiSendAll()),
-          forceUi: !!(extra.forceUi || useUiSendAll()),
-          manualOpener: opts.manualOpener
-        }
-      );
-      ids.push(result.id);
-      return result.id;
-    };
-    if (useSplitLinkMessages() && link && link.trim()) {
-      const text = (rawMsg || '').trim();
-      if (text) {
-        await this._typing(chat);
-        await doSend(text, 'texte', chat);
-        const delay = rand(config.linkDelayMin, config.linkDelayMax);
-        this.log(`⏱ Délai anti-ban avant lien : ${(delay/1000).toFixed(1)}s`, 'info');
-        await sleep(delay);
-      }
-      await this._typing(chat);
-      await doSend(link.trim(), 'lien', null);
-      assertDistinctMessageIds(ids);
-      return { messageCount: text ? 2 : 1, ids, lastId: ids[ids.length - 1] };
-    }
-    const parts = useSplitLinkMessages() ? splitMessageAndLink(rawMsg) : null;
-    if (parts) {
-      if (parts.text) {
-        await this._typing(chat);
-        await doSend(parts.text, 'texte', chat);
-        await sleep(rand(config.linkDelayMin, config.linkDelayMax));
-        await doSend(parts.url, 'lien', null);
-        assertDistinctMessageIds(ids);
-        return { messageCount: 2, ids, lastId: ids[ids.length - 1] };
-      }
-      await this._typing(chat);
-      await doSend(parts.url, 'url-seule', chat);
-      return { messageCount: 1, ids, lastId: ids[ids.length - 1] };
-    }
     await this._typing(chat);
-    await doSend(rawMsg, 'texte-simple', chat);
-    return { messageCount: 1, ids, lastId: ids[ids.length - 1] };
+    const sendLabel = useUiSendAll() ? 'question-ui' : 'question';
+    const result = await sendSingleOutbound(
+      this.client, chatId, text, sendLabel, this.log.bind(this), chat,
+      {
+        ackSoft,
+        viaUi: !!useUiSendAll(),
+        forceUi: !!(opts.forceUi || useUiSendAll()),
+        manualOpener: opts.manualOpener
+      }
+    );
+    ids.push(result.id);
+    return { messageCount: 1, ids, lastId: result.id };
   }
 
 
   /**
    * Chemin d'envoi unique : test dashboard et queue campagne utilisent exactement la même logique.
    */
-  async _deliverToNumber(number, contact, { message, link, skipProbe = false } = {}) {
+  async _deliverToNumber(number, contact, { message, link, skipProbe = false, sendIndex = 0 } = {}) {
     await resolveOutboundChatId(this.client, number, this.log.bind(this));
     const { chatId, chat: prefetchedChat, isColdContact } = await prepareOutboundChat(this.client, number, this.log.bind(this));
     const cusChatId = normalizeOutboundChatId(chatId, number);
@@ -1709,18 +1782,18 @@ class BotAccount {
     if (!await safeIsRegisteredUser(this.client, cusChatId, this.log.bind(this))) {
       throw new Error(`+${number} n'est pas sur WhatsApp`);
     }
-    const rawMsgBase = personalizeMessage(
-      (message ?? contact.message ?? '').trim() || process.env.DEFAULT_MESSAGE || 'Bonjour ! 👋',
-      contact
-    );
-    const linkBase = personalizeMessage((link ?? contact.link ?? '').trim(), contact);
-    const { rawMsg, link: personalizedLink, combined } = prepareOutboundContent(rawMsgBase, linkBase);
-    const useOpener = shouldUseManualOpener(number, isColdContact);
+    const workContact = {
+      ...contact,
+      message: (message ?? contact.message ?? '').trim() || process.env.DEFAULT_MESSAGE || 'Bonjour ! 👋',
+      messageOriginal: contact.messageOriginal || contact.message,
+    };
+    const rawMsg = await this._resolveContactMessage(workContact, sendIndex);
+    const personalizedLink = personalizeMessage((link ?? contact.link ?? '').trim(), contact);
+    const hasLink = !!personalizedLink;
+    const useOpener = !hasLink && shouldUseManualOpener(number, isColdContact);
     const openerText = useOpener ? getColdOpenerText() : '';
-    const splitRoute = useManualRouteSplit() && combined && !!(linkBase && linkBase.trim());
-    let msgCount = countOutboundMessages(rawMsg, personalizedLink);
+    let msgCount = countOutboundMessages(rawMsg);
     if (openerText) msgCount += 1;
-    if (splitRoute) msgCount += 1;
     if (msgCount === 0) throw new Error('Message vide');
     if (msgCount > this._messagesAvailable()) {
       throw new Error(`Quota insuffisant : ${msgCount} message(s) requis, ${this._messagesAvailable()} restant(s) sur ${this.dailyLimit}`);
@@ -1728,61 +1801,37 @@ class BotAccount {
     if (!(await this._waitForHourlyCapacity(msgCount))) {
       throw new Error('Envoi annulé : limite horaire');
     }
-    if (splitRoute && openerText) {
-      this.log('📨 Parcours manuel : Hey → texte → lien (3 messages)', 'info');
-    } else if (splitRoute) {
-      this.log('📨 Parcours : texte puis lien (2 messages)', 'info');
+    if (hasLink) {
+      this.log('💬 Question envoyée — lien après réponse positive uniquement', 'info');
     }
     if (useOpener && openerText) {
-      this.log(`👋 Étape 1 (comme manuel) : "${openerText}" puis campagne`, 'info');
+      this.log(`👋 Envoi Hey (${openerText})...`, 'info');
       await sleep(rand(400, 1200));
     }
     this._recordFirstSend();
     const sendOpts = { coldContact: isColdContact || useOpener, manualOpener: useOpener };
-    let result;
     const sendId = cusChatId;
+    let result;
     if (openerText) {
-      this.log(`👋 Envoi Hey (${openerText})...`, 'info');
       const openerResult = await this._sendMessage(sendId, openerText, '', prefetchedChat, {
         ...sendOpts, manualOpener: true, forceUi: true
       });
-      this.log(`✅ Hey livré (${openerResult.messageCount} msg)`, 'success');
       await sleep(COLD_OPENER_DELAY_MS);
-      if (splitRoute) {
-        const textOnly = personalizeMessage((message ?? contact.message ?? '').trim() || process.env.DEFAULT_MESSAGE || '', contact);
-        const linkOnly = personalizeMessage((link ?? contact.link ?? '').trim(), contact);
-        const textResult = await this._sendMessage(sendId, textOnly, '', prefetchedChat, { ...sendOpts, forceUi: useUiSendAll() });
-        await sleep(rand(config.linkDelayMin, config.linkDelayMax));
-        const linkResult = await this._sendMessage(sendId, linkOnly, '', prefetchedChat, { ...sendOpts, forceUi: useUiSendAll() });
-        result = {
-          messageCount: openerResult.messageCount + textResult.messageCount + linkResult.messageCount,
-          ids: [...(openerResult.ids || []), ...(textResult.ids || []), ...(linkResult.ids || [])],
-          lastId: linkResult.lastId
-        };
-      } else {
-        const mainResult = await this._sendMessage(sendId, rawMsg, personalizedLink, prefetchedChat, sendOpts);
-        result = {
-          messageCount: openerResult.messageCount + mainResult.messageCount,
-          ids: [...(openerResult.ids || []), ...(mainResult.ids || [])],
-          lastId: mainResult.lastId
-        };
-      }
-    } else if (splitRoute) {
-      const textOnly = personalizeMessage((message ?? contact.message ?? '').trim() || process.env.DEFAULT_MESSAGE || '', contact);
-      const linkOnly = personalizeMessage((link ?? contact.link ?? '').trim(), contact);
-      const textResult = await this._sendMessage(sendId, textOnly, '', prefetchedChat, { ...sendOpts, forceUi: useUiSendAll() });
-      await sleep(rand(config.linkDelayMin, config.linkDelayMax));
-      const linkResult = await this._sendMessage(sendId, linkOnly, '', prefetchedChat, { ...sendOpts, forceUi: useUiSendAll() });
+      const mainResult = await this._sendMessage(sendId, rawMsg, '', prefetchedChat, sendOpts);
       result = {
-        messageCount: textResult.messageCount + linkResult.messageCount,
-        ids: [...(textResult.ids || []), ...(linkResult.ids || [])],
-        lastId: linkResult.lastId
+        messageCount: openerResult.messageCount + mainResult.messageCount,
+        ids: [...openerResult.ids, ...mainResult.ids],
+        lastId: mainResult.lastId
       };
     } else {
-      result = await this._sendMessage(sendId, rawMsg, personalizedLink, prefetchedChat, sendOpts);
+      result = await this._sendMessage(sendId, rawMsg, '', prefetchedChat, sendOpts);
     }
     this.state.sessionHealthy = true;
-    return { chatId: sendId, number, rawMsg, personalizedLink, msgCount, result, combined, openerUsed: !!openerText, splitRoute };
+    return {
+      chatId: sendId, number, rawMsg, personalizedLink, msgCount,
+      result, combined: false, openerUsed: !!openerText, splitRoute: false,
+      awaitingLink: hasLink
+    };
   }
 
   async sendTest(phone, message, link) {
@@ -1813,10 +1862,10 @@ class BotAccount {
     this.state.limitReached = false;
     const startStats={...this.state.stats}, startTime=Date.now();
     let notReadyTicks = 0;
+    if (this._campaignUsesAiSpin()) this.log('🤖 Spin IA (Groq) : 1er contact = texte validé, suivants = variantes', 'info');
+    this.log('💬 1 question par contact — lien uniquement après réponse positive', 'info');
     this.log(`🚀 Démarrage : ${pendingCount} contact(s) · quota ${this.state.dailySent}/${this.dailyLimit} msgs WA`,'success');
-    if (!useSplitLinkMessages()) {
-      this.log('📨 Mode campagne : 1 message WhatsApp par contact (texte + lien combinés)', 'info');
-    }
+    let campaignSendIndex = 0;
     try {
       await probeWhatsAppConnection(this.client, this.log.bind(this), { strict: false });
       this.state.sessionHealthy = true;
@@ -1876,16 +1925,30 @@ class BotAccount {
             this._saveQueue(); await sleep(rand(1000,3000)); continue;
           }
           await sleep(rand(800, 2500));
-          const { rawMsg, personalizedLink, result } = await this._deliverToNumber(number, contact, { skipProbe: true });
+          const delivery = await this._deliverToNumber(number, contact, { skipProbe: true, sendIndex: campaignSendIndex++ });
+          const { rawMsg, personalizedLink, result, awaitingLink } = delivery;
           this._consecutiveRejects = 0;
-          contact.status='done'; contact.sentAt=new Date().toISOString();
-          contact.waMessageId=result.lastId; contact.whatsappMessagesSent=result.messageCount;
-          this.state.stats.sent++; this.state.sessionCount++;
+          contact.sentAt = new Date().toISOString();
+          contact.waMessageId = result.lastId;
+          contact.whatsappMessagesSent = result.messageCount;
+          if (awaitingLink) {
+            contact.status = 'awaiting_reply';
+            contact.awaitingLink = true;
+            contact.linkSent = false;
+            this.log(`✅ Question à +${number}${contact.prenom ? ' (' + contact.prenom + ')' : ''} — lien si réponse +`, 'success');
+          } else {
+            contact.status = 'done';
+            this.log(`✅ Envoyé à +${number}${contact.prenom ? ' (' + contact.prenom + ')' : ''} [${this.state.dailySent + result.messageCount}/${this.dailyLimit}]`, 'success');
+          }
+          this.state.stats.sent++;
+          this.state.sessionCount++;
           this.state.dailySent += result.messageCount;
           this._recordMessagesSent(result.messageCount);
-          const linkNote = result.messageCount >= 2 ? ' (texte + lien = 2 msgs)' : '';
-          this.log(`✅ Envoyé à +${number}${contact.prenom?' ('+contact.prenom+')':''}${linkNote} [${this.state.dailySent}/${this.dailyLimit} msgs]`,'success');
-          addToSentHistory(number, { sentAt: contact.sentAt, botId: this.id, message: rawMsg, link: personalizedLink, prenom: contact.prenom, nom: contact.nom });
+          addToSentHistory(number, {
+            sentAt: contact.sentAt, botId: this.id, message: rawMsg,
+            link: awaitingLink ? '(lien après opt-in)' : personalizedLink,
+            prenom: contact.prenom, nom: contact.nom,
+          });
           this._saveQueue();
           await this._delayMsg();
           if (!this.state.running) break;
@@ -1902,8 +1965,7 @@ class BotAccount {
             this._saveQueue(); continue;
           }
           if (/Quota insuffisant/i.test(err.message)) {
-            const msgCount = countOutboundMessages(
-              personalizeMessage((contact.message||'').trim()||process.env.DEFAULT_MESSAGE||'Bonjour ! 👋', contact),
+            const msgCount = countOutboundMessages(personalizeMessage((contact.message||'').trim()||process.env.DEFAULT_MESSAGE||'Bonjour ! 👋'),
               personalizeMessage((contact.link||'').trim(), contact)
             );
             this.state.running=false; this.state.limitReached=true; this.state.limitReachedAt=new Date().toISOString();
@@ -1973,7 +2035,20 @@ class BotAccount {
     }
   }
 
-  importCSV(content, defaultMessage, defaultLink, forceIncludeDuplicates = []) {
+  setCampaign(opts = {}) {
+    this.state.campaign = {
+      messageOriginal: (opts.messageOriginal || opts.message || '').trim(),
+      message: (opts.message || '').trim(),
+      link: (opts.link || '').trim(),
+      conversational: true,
+      aiSpin: opts.aiSpin !== false,
+      preparedAt: new Date().toISOString(),
+    };
+    if (!this.state.spinUsed) this.state.spinUsed = [];
+    this._saveQueue(true);
+  }
+
+  importCSV(content, defaultMessage, defaultLink, forceIncludeDuplicates = [], campaignOpts = {}) {
     const records = csv.parse(content, { columns: true, skip_empty_lines: true });
     const blacklistCache   = loadBlacklist();
     const sentHistoryCache = loadSentHistory();
@@ -1991,7 +2066,18 @@ class BotAccount {
         duplicates.push({ phone, prenom: prenom.trim() || histEntry.prenom, nom: nom.trim() || histEntry.nom, contactCount: histEntry.contactCount, lastSentAt: histEntry.lastSentAt, lastMessage: histEntry.lastMessage, lastLink: histEntry.lastLink, lastBotId: histEntry.lastBotId, contacts: histEntry.contacts.slice(0, 15) });
         continue;
       }
-      this.state.queue.push({ phone, status:'pending', prenom:prenom.trim(), nom:nom.trim(), message:row.message||defaultMessage, link:row.link||defaultLink||'', addedAt:new Date().toISOString() });
+      const msg = (row.message || defaultMessage || '').trim();
+      const hasLink = !!(row.link || defaultLink);
+      let aiSpin = campaignOpts.aiSpin !== false && (this.state.campaign?.aiSpin !== false);
+      if (campaignOpts.aiSpin === false) aiSpin = false;
+      this.state.queue.push({
+        phone, status: 'pending', prenom: prenom.trim(), nom: nom.trim(),
+        message: msg,
+        messageOriginal: (campaignOpts.messageOriginal || msg).trim(),
+        link: (row.link || defaultLink || '').trim(),
+        aiSpin, awaitingLink: false, linkSent: false,
+        addedAt: new Date().toISOString(),
+      });
       added++;
     }
     this._saveQueue();
@@ -2012,11 +2098,11 @@ class BotAccount {
     this._checkWindowReset();
     const resetInMs=this._windowResetIn();
     const pendingList = this.state.queue.filter(c => c.status === 'pending');
-    let pendingWhatsAppMessages = 0, pendingWithDoubleMessage = 0;
+    let pendingWhatsAppMessages = 0;
     for (const c of pendingList) {
-      const mc = countOutboundMessages(personalizeMessage((c.message || '').trim() || process.env.DEFAULT_MESSAGE || '', c), personalizeMessage((c.link || '').trim(), c));
-      pendingWhatsAppMessages += mc;
-      if (mc >= 2) pendingWithDoubleMessage++;
+      pendingWhatsAppMessages += countOutboundMessages(
+        personalizeMessage((c.message || '').trim() || process.env.DEFAULT_MESSAGE || '', c)
+      );
     }
     this._pruneSendTimestamps();
     return {
@@ -2032,7 +2118,13 @@ class BotAccount {
       hourlySent: this.state.sendTimestamps.length,
       maxMessagesPerHour: config.maxMessagesPerHour,
       relayed:    this.state.queue.filter(c=>c.status==='relayed').length,
+      awaitingReply: this.state.queue.filter(c=>c.status==='awaiting_reply').length,
+      linksSent:  this.state.queue.filter(c=>c.linkSent===true).length,
+      declined:   this.state.queue.filter(c=>c.status==='declined').length,
       replied:    this.state.queue.filter(c=>c.replied===true).length,
+      campaign:   this.state.campaign || null,
+      aiEnabled:  ai.isAiEnabled(),
+      aiProvider: ai.getAiProvider()?.name || null,
       blacklisted:this.state.queue.filter(c=>c.status==='blacklisted').length,
       total:      this.state.queue.length,
       sessionCount:this.state.sessionCount,
@@ -2240,18 +2332,50 @@ app.get('/api/:account/export', (req,res)=>{
   res.send(stringify(rows,{header:true}));
 });
 
+app.post('/api/:account/prepare-campaign', async (req, res) => {
+  const bot = requireBot(req, res);
+  if (!bot) return;
+  const pitch = (req.body.message || '').trim();
+  const link = (req.body.link || '').trim();
+  const aiSpin = req.body.aiSpin !== false;
+  if (!pitch) return res.status(400).json({ ok: false, error: 'Message requis' });
+  let question = pitch;
+  let aiQuestionUsed = false;
+  if (link && ai.isAiEnabled()) {
+    try {
+      question = await ai.generateConversationalQuestion(pitch, link);
+      aiQuestionUsed = true;
+      bot.log('🤖 Question générée (Groq)', 'info');
+    } catch (e) {
+      bot.log(`⚠️ IA question : ${e.message}`, 'warn');
+    }
+  } else if (link && !ai.isAiEnabled()) {
+    bot.log('⚠️ GROQ_API_KEY absente', 'warn');
+  }
+  bot.setCampaign({ messageOriginal: question, message: question, pitch, link, aiSpin });
+  const provider = ai.getAiProvider();
+  res.json({
+    ok: true, message: question, messageOriginal: pitch, link, aiSpin,
+    aiQuestionUsed, aiEnabled: ai.isAiEnabled(), aiProvider: provider?.name || null,
+  });
+});
+
 app.post('/api/:account/import', upload.single('file'), (req,res)=>{
   const bot=requireBot(req,res); if(!bot) return;
   if (!req.file) return res.status(400).json({ok:false,error:'Fichier manquant'});
   let forceInclude;
   try { forceInclude = JSON.parse(req.body.forceInclude||'[]'); } catch(_) { forceInclude = []; }
+  const aiSpin = req.body.aiSpin !== '0' && req.body.aiSpin !== 'false';
+  const messageOriginal = (req.body.messageOriginal || req.body.message || '').trim();
   let result;
   try {
     const content=fs.readFileSync(req.file.path,'utf-8');
     const message=(req.body.message||'').trim();
     const link=(req.body.link||'').trim();
     if(!message && !link) return res.status(400).json({ok:false,error:'Message ou lien requis'});
-    result=bot.importCSV(content,message,link,forceInclude);
+    if (!bot.state.campaign) bot.setCampaign({ messageOriginal, message, link, aiSpin });
+    else { bot.state.campaign.message = message; bot.state.campaign.link = link; }
+    result=bot.importCSV(content, message, link, forceInclude, { messageOriginal, aiSpin });
   } catch(e){ return res.status(400).json({ok:false,error:e.message}); }
   finally { try { fs.unlinkSync(req.file.path); } catch(_) {} }
   if(result.duplicates.length>0 && forceInclude.length===0) res.json({ok:true,...result,needsConfirmation:true});

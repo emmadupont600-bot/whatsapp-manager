@@ -232,7 +232,7 @@ tr:hover td{background:var(--surface2)}
         <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border);display:flex;align-items:center;gap:8px;flex-wrap:wrap">
           <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text);font-weight:500;cursor:pointer;margin-right:4px">
             <input type="checkbox" id="quota-as-contacts" style="width:auto" checked onchange="toggleQuotaAsContacts()">
-            Compter en contacts (texte + lien = 2 msgs)
+            Compter en contacts (1 question / contact)
           </label>
         </div>
         <div style="margin-top:8px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
@@ -328,8 +328,18 @@ tr:hover td{background:var(--surface2)}
         <div class="form-group">
           <label>Lien à envoyer (optionnel)</label>
           <input type="url" id="import-link" placeholder="https://ton-lien.com" oninput="updatePreview()">
-          <div class="link-info" id="link-info" style="display:none">🔗 <span>Le lien part dans un <strong>2ᵉ message WhatsApp</strong> (cliquable). Compte <strong>2×</strong> sur le quota du jour. Délai aléatoire entre les deux.</span></div>
+          <div class="link-info" id="link-info" style="display:none">🔗 <span id="link-info-text">Le lien part <strong>uniquement après une réponse positive</strong>.</span></div>
           <div id="import-msg-wa-count" style="font-size:11px;color:var(--muted);margin-top:6px"></div>
+        </div>
+        <div class="form-group" style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border)">
+          <div class="card-title" style="margin-bottom:10px">🤖 IA (Groq)</div>
+          <p style="font-size:12px;color:var(--muted);margin-bottom:10px">1 question par contact — plus d'envoi texte puis lien d'affilée. Lien après opt-in (oui, chaud, 👍).</p>
+          <label style="display:flex;align-items:flex-start;gap:8px;font-size:13px;margin-bottom:12px;cursor:pointer">
+            <input type="checkbox" id="ai-spin-mode" checked onchange="updatePreview()" style="margin-top:3px">
+            <span><strong>Spin IA</strong> — 1er contact = texte validé ; suivants = variantes Groq</span>
+          </label>
+          <button type="button" class="btn btn-primary" id="btn-prepare-campaign" onclick="prepareCampaign()">✨ Valider & préparer le message</button>
+          <div id="prepare-status" style="font-size:12px;margin-top:8px;color:var(--muted)"></div>
         </div>
         <div style="font-size:12px;color:var(--muted);margin-bottom:5px">👁 Aperçu :</div>
         <div class="msg-preview" id="msg-preview" style="color:var(--muted)">Votre message apparaîtra ici...</div>
@@ -609,7 +619,7 @@ tr:hover td{background:var(--surface2)}
       <div class="card">
         <div class="card-title">Informations quota</div>
         <div style="color:var(--muted);font-size:13px;line-height:1.8">
-          <p>📌 Le compteur suit les <strong style="color:var(--text)">messages WhatsApp réels</strong> (texte + lien séparé = <strong>2</strong>).</p>
+          <p>📌 Le compteur suit les <strong style="color:var(--text)">questions envoyées</strong> (1 par contact). Les liens après opt-in sont en plus.</p>
           <p>🛡️ Recommandé ~250–300 / 24h sur compte perso (non officiel). Le plafond horaire évite les pics suspects.</p>
           <p>⏰ Reset <strong style="color:var(--text)">24h après le 1er envoi</strong> de la fenêtre en cours.</p>
           <p>🔁 Reprise automatique possible après reset.</p>
@@ -888,19 +898,8 @@ function loadChartJS() {
 ═══════════════════════════════════════════════════ */
 const AVG = 82; // repli si l'API ne renvoie pas estimatedQueueSec
 
-function countOutboundMessagesClient(msg, link) {
-  const text = (msg || '').trim();
-  const separateLink = !!(link && link.trim());
-  if (separateLink && text) return 2;
-  if (separateLink) return 1;
-  const m = text.match(/(https?:\/\/[^\s]+)/i);
-  if (m) {
-    const before = text.slice(0, m.index).trim();
-    const after = text.slice(m.index + m[1].length).trim();
-    const hasText = !!(before || after);
-    return hasText ? 2 : 1;
-  }
-  return text ? 1 : 0;
+function countOutboundMessagesClient(msg) {
+  return (msg || '').trim() ? 1 : 0;
 }
 
 function queueEtaSeconds(r) {
@@ -930,7 +929,7 @@ function updateQuotaLabels() {
   const title = document.querySelector('#quota-card .card-title');
   if (title) {
     title.textContent = contacts
-      ? 'Quota en contacts (24h) — texte + lien'
+      ? 'Quota en contacts (24h) — 1 question / contact'
       : 'Quota messages WhatsApp (24h glissantes)';
   }
   const hint = document.getElementById('quota-limit-hint');
@@ -1704,11 +1703,51 @@ function renderCSVFileList() {
   btnImport.style.display='inline-flex'; btnClear.style.display='inline-flex';
 }
 
+function getCampaignFormFlags() {
+  return {
+    aiSpin: document.getElementById('ai-spin-mode')?.checked !== false,
+    messageOriginal: window._campaignMessageOriginal || document.getElementById('import-message').value.trim(),
+  };
+}
+
+async function prepareCampaign() {
+  const pitch = document.getElementById('import-message').value.trim();
+  const link = document.getElementById('import-link').value.trim();
+  const statusEl = document.getElementById('prepare-status');
+  const btn = document.getElementById('btn-prepare-campaign');
+  if (!pitch) { statusEl.innerHTML = '<span class="badge badge-red">Message requis</span>'; return; }
+  btn.disabled = true;
+  statusEl.textContent = '⏳ Groq en cours...';
+  try {
+    const r = await fetch(`/api/${currentAccount}/prepare-campaign`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        message: pitch, link,
+        aiSpin: document.getElementById('ai-spin-mode')?.checked !== false,
+      }),
+    }).then(x => x.json());
+    if (!r.ok) throw new Error(r.error || 'Échec');
+    window._campaignMessageOriginal = r.message || pitch;
+    if (r.message) document.getElementById('import-message').value = r.message;
+    let note = r.aiQuestionUsed ? `✅ Question IA (${r.aiProvider || 'Groq'})` : (r.aiEnabled ? '✅ Validé' : '⚠️ Ajoutez GROQ_API_KEY sur Railway');
+    if (link) note += ' · Lien après réponse +';
+    if (r.aiSpin && r.aiEnabled) note += ' · Spin actif';
+    statusEl.innerHTML = `<span class="badge badge-green">${note}</span>`;
+    updatePreview();
+  } catch (e) {
+    statusEl.innerHTML = `<span class="badge badge-red">${escHtml(e.message)}</span>`;
+  } finally { btn.disabled = false; }
+}
+
 async function postImportCSV(file, message, link, forceInclude = []) {
+  const flags = getCampaignFormFlags();
   const fd = new FormData();
   fd.append('file', file);
   fd.append('message', message);
   if (link) fd.append('link', link);
+  fd.append('aiSpin', flags.aiSpin ? '1' : '0');
+  if (flags.messageOriginal) fd.append('messageOriginal', flags.messageOriginal);
   if (forceInclude.length) fd.append('forceInclude', JSON.stringify(forceInclude));
   return fetch(`/api/${currentAccount}/import`, { method: 'POST', body: fd }).then(r => r.json());
 }
@@ -1882,14 +1921,13 @@ async function importAllCSV() {
 function updatePreview() {
   const msg  = document.getElementById('import-message').value;
   const link = document.getElementById('import-link').value.trim();
-  const waCount = countOutboundMessagesClient(msg, link);
+  const waCount = countOutboundMessagesClient(msg);
   document.getElementById('msg-count').textContent = msg.length+' caractères';
   const waEl = document.getElementById('import-msg-wa-count');
   if (waEl) {
-    const contactNote = isQuotaAsContacts() && waCount >= 2 ? ' → 1 contact sur le quota' : '';
-    waEl.innerHTML = waCount >= 1
-      ? '<span class="badge badge-blue">1 message WhatsApp par contact (texte + lien combinés)</span>'
-      : '';
+    waEl.innerHTML = waCount === 1 && link
+      ? '<span class="badge badge-blue">1 question / contact · lien après réponse +</span>'
+      : waCount === 1 ? '<span class="badge badge-blue">1 message / contact</span>' : '';
   }
   const p = document.getElementById('msg-preview');
   const preview = msg.replace(/\{prénom\}/gi,'Marie').replace(/\{nom\}/gi,'Dupont').replace(/\{prenom\}/gi,'Marie');
@@ -1899,7 +1937,7 @@ function updatePreview() {
   const linkInfo = document.getElementById('link-info');
   if (link) {
     linkInfo.style.display='flex';
-    linkWrap.innerHTML = `<div class="link-preview-box">🔗 <a href="${link}" target="_blank" rel="noopener">${link}</a></div>`;
+    linkWrap.innerHTML = `<div class="link-preview-box">🔗 <a href="${link}" target="_blank" rel="noopener">${link}</a> <span style="font-size:11px;color:var(--muted)">(après opt-in)</span></div>`;
   } else { linkInfo.style.display='none'; linkWrap.innerHTML=''; }
 }
 
