@@ -1334,9 +1334,55 @@ function statusBadge(s) {
 /* ═══════════════════════════════════════════════════
    STATUS POLLING
 ═══════════════════════════════════════════════════ */
-function applyStatus(r) {
-  if (!r || (r.error && r.id == null && r.ok === false)) {
-    showApiError(r?.error || 'Réponse API invalide (401 token ?)');
+function normalizeStatus(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const stats = raw.stats && typeof raw.stats === 'object'
+    ? raw.stats
+    : { sent: 0, failed: 0, skipped: 0, blacklisted: 0 };
+  return {
+    id: raw.id,
+    ok: raw.ok !== false,
+    ready: !!raw.ready,
+    qr: raw.qr || null,
+    running: !!raw.running,
+    paused: !!raw.paused,
+    initializing: !!raw.initializing,
+    resettingAuth: !!raw.resettingAuth,
+    sessionHealthy: raw.sessionHealthy ?? null,
+    lastInitError: raw.lastInitError || null,
+    stats,
+    pending: raw.pending ?? 0,
+    pendingWhatsAppMessages: raw.pendingWhatsAppMessages ?? 0,
+    total: raw.total ?? 0,
+    dailySent: raw.dailySent ?? 0,
+    dailyLimit: raw.dailyLimit ?? 300,
+    limitReached: !!raw.limitReached,
+    resetInMs: raw.resetInMs ?? 0,
+    windowStart: raw.windowStart || null,
+    resumeAt: raw.resumeAt || null,
+    autoResume: raw.autoResume !== false,
+    quotaAsContacts: raw.quotaAsContacts !== false,
+    maxMessagesPerHour: raw.maxMessagesPerHour,
+    hourlySent: raw.hourlySent ?? 0,
+    messagesAvailable: raw.messagesAvailable,
+    log: Array.isArray(raw.log) ? raw.log : [],
+    error: raw.error || null,
+  };
+}
+
+function applyStatus(raw) {
+  const r = normalizeStatus(raw);
+  if (!r) {
+    showApiError('Réponse API vide');
+    return;
+  }
+  if (raw?.error && raw.ok === false) {
+    showApiError(raw.error);
+    paintLogs(r);
+    const acct = r.id || currentAccount;
+    lastStatus[acct] = r;
+    updateQR(r, acct);
+    paintConnBadge(acct, false);
     return;
   }
   showApiError('');
@@ -1557,15 +1603,21 @@ async function fetchStatus() {
       showApiError(`Réponse invalide (${res.status}) — redeploy en cours ?`);
       return;
     }
-    if (!res.ok) showApiError(r.error || `Erreur API ${res.status}`);
-    else showApiError('');
+    if (!res.ok) {
+      showApiError(r.error || `Erreur API ${res.status}`);
+      applyStatus(r);
+      return;
+    }
+    showApiError('');
     applyStatus(r);
   } catch(e) {
     showApiError(`Réseau : ${e.message || e} — URL=${apiUrl('/api/' + currentAccount + '/status')} — Paramètres → Tester connexion`);
   }
   const other = currentAccount === 1 ? 2 : 1;
   try {
-    const r = await fetch(`/api/${other}/status`).then(res => res.json());
+    const res = await fetch(`/api/${other}/status`);
+    const r = normalizeStatus(await res.json());
+    if (!r) return;
     const acct = r.id || other;
     lastStatus[acct] = r;
     getStableReady(acct, !!r.ready);
@@ -2220,7 +2272,8 @@ async function renderOverview() {
   const grid=document.getElementById('overview-grid');
   grid.innerHTML='<div style="color:var(--muted);font-size:13px;padding:12px">Chargement...</div>';
   const [r1,r2]=await Promise.all([fetch('/api/1/status').then(r=>r.json()).catch(()=>null),fetch('/api/2/status').then(r=>r.json()).catch(()=>null)]);
-  grid.innerHTML=[r1,r2].map((r,i)=>{
+  grid.innerHTML=[r1,r2].map((raw,i)=>{
+    const r = normalizeStatus(raw);
     if(!r) return `<div class="card"><div class="card-title">Compte ${i+1}</div><span class="badge badge-red">Hors ligne</span></div>`;
     const color=i===0?'var(--primary)':'var(--blue)';
     const pct=r.total>0?Math.round((r.total-r.pending)/r.total*100):0;

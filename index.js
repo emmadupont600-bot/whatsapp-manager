@@ -2229,6 +2229,9 @@ class BotAccount {
   }
 
   getStatus() {
+    if (!this.state.stats || typeof this.state.stats !== 'object') {
+      this.state.stats = { sent: 0, failed: 0, skipped: 0, blacklisted: 0 };
+    }
     this._checkWindowReset();
     const resetInMs=this._windowResetIn();
     const pendingList = this.state.queue.filter(c => c.status === 'pending');
@@ -2409,7 +2412,10 @@ app.get('/api/:account/status', (req, res) => {
     res.json(b.getStatus());
   } catch (e) {
     console.error(`[API] getStatus bot${b.id}:`, e.message);
-    res.status(500).json({ ok: false, id: b.id, error: e.message, log: (b.state.log || []).slice(0, 20) });
+    let fallback;
+    try { fallback = stubBotStatus(b.id); fallback.ok = false; fallback.error = e.message; fallback.log = (b.state.log || []).slice(0, 20); }
+    catch (_) { fallback = { ok: false, id: b.id, error: e.message, stats: { sent: 0, failed: 0, skipped: 0, blacklisted: 0 }, log: [] }; }
+    res.status(500).json(fallback);
   }
 });
 
