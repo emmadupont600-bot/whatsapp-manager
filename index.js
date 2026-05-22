@@ -125,12 +125,17 @@ setInterval(cleanUploadsDir, MAX_AGE_MS);
 
 const AUTH_TOKEN = process.env.AUTH_TOKEN || '';
 function authMiddleware(req, res, next) {
+  if (req.path === '/ping' || req.path === '/health') return next();
   if (!AUTH_TOKEN) return next();
   const header = req.headers['authorization'] || '';
-  const token  = header.startsWith('Bearer ') ? header.slice(7) : '';
-  if (token !== AUTH_TOKEN) return res.status(401).json({ ok: false, error: 'Non autorisé. Token Bearer requis.' });
-  next();
+  const bearer = header.startsWith('Bearer ') ? header.slice(7) : '';
+  const query  = typeof req.query.token === 'string' ? req.query.token : '';
+  if (bearer === AUTH_TOKEN || query === AUTH_TOKEN) return next();
+  return res.status(401).json({ ok: false, error: 'Non autorisé. Token Bearer requis (Paramètres dashboard ou ?token=).' });
 }
+app.get('/api/ping', (req, res) => {
+  res.json({ ok: true, ts: Date.now(), commit: BUILD_COMMIT, version: APP_VERSION, bots: Object.keys(bots) });
+});
 app.use('/api', authMiddleware);
 
 const _rateLimitMap = new Map();
@@ -2298,19 +2303,52 @@ class BotAccount {
   clearLogs() { this.state.log = []; saveLogs(this.id, []); console.log(`[BOT${this.id}] Logs effacés`); }
 }
 
-// ─── Comptes actifs ───────────────────────────────────────────────────────────
+// ─── Comptes actifs (démarrés après app.listen pour garder l'API en ligne) ───
 const bots = {};
-if (ENABLED_ACCOUNTS.has(1)) bots[1] = new BotAccount(1);
-if (ENABLED_ACCOUNTS.has(2)) bots[2] = new BotAccount(2);
-if (bots[1] && bots[2]) {
-  bots[1]._partner = bots[2];
-  bots[2]._partner = bots[1];
-} else if (bots[1]) {
-  bots[1]._partner = bots[1];
-} else if (bots[2]) {
-  bots[2]._partner = bots[2];
+let botsBootstrapped = false;
+
+function stubBotStatus(id) {
+  return {
+    id,
+    ok: true,
+    ready: false,
+    qr: null,
+    running: false,
+    paused: false,
+    initializing: true,
+    resettingAuth: false,
+    sessionHealthy: null,
+    lastInitError: null,
+    stats: { sent: 0, failed: 0, skipped: 0, blacklisted: 0 },
+    pending: 0,
+    pendingWhatsAppMessages: 0,
+    pendingWithDoubleMessage: 0,
+    total: 0,
+    dailySent: 0,
+    dailyLimit: dailyLimitMap[id] || DEFAULT_DAILY_LIMIT,
+    log: [{ time: new Date().toISOString(), msg: '⏳ Démarrage du bot WhatsApp...', type: 'info' }],
+  };
 }
-console.log(`[BOOT] Comptes actifs : ${Object.keys(bots).join(', ') || 'aucun'} · Chromium=${CHROMIUM_PATH} · exists=${fs.existsSync(CHROMIUM_PATH)}`);
+
+function startBots() {
+  if (botsBootstrapped) return;
+  botsBootstrapped = true;
+  try {
+    if (ENABLED_ACCOUNTS.has(1)) bots[1] = new BotAccount(1);
+    if (ENABLED_ACCOUNTS.has(2)) bots[2] = new BotAccount(2);
+    if (bots[1] && bots[2]) {
+      bots[1]._partner = bots[2];
+      bots[2]._partner = bots[1];
+    } else if (bots[1]) {
+      bots[1]._partner = bots[1];
+    } else if (bots[2]) {
+      bots[2]._partner = bots[2];
+    }
+    console.log(`[BOOT] Comptes actifs : ${Object.keys(bots).join(', ') || 'aucun'} · Chromium=${CHROMIUM_PATH} · exists=${fs.existsSync(CHROMIUM_PATH)}`);
+  } catch (e) {
+    console.error('[BOOT] Échec démarrage bots :', e);
+  }
+}
 
 function getBot(req) {
   const id = parseInt(req.params.account || req.query.account || '');
@@ -2361,13 +2399,17 @@ app.get('/api/health', (req, res) => {
 });
 
 app.get('/api/:account/status', (req, res) => {
-  const b = requireBot(req, res);
-  if (!b) return;
+  const id = parseInt(req.params.account, 10);
+  if (isNaN(id) || !ENABLED_ACCOUNTS.has(id)) {
+    return res.status(404).json({ ok: false, error: `Compte invalide. Actifs : ${[...ENABLED_ACCOUNTS].join(', ')}` });
+  }
+  const b = bots[id];
+  if (!b) return res.json(stubBotStatus(id));
   try {
     res.json(b.getStatus());
   } catch (e) {
     console.error(`[API] getStatus bot${b.id}:`, e.message);
-    res.status(500).json({ ok: false, id: b.id, error: e.message, log: b.state.log.slice(0, 20) });
+    res.status(500).json({ ok: false, id: b.id, error: e.message, log: (b.state.log || []).slice(0, 20) });
   }
 });
 
@@ -2682,23 +2724,25 @@ app.get('/api/status', (req, res) => {
   catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 app.post('/api/start',(req,res)=>{
-  if(!bots[1].state.ready) return res.status(400).json({ok:false,error:'Non connecté'});
-  bots[1].state.paused=false; bots[1].state.limitReached=false; bots[1].state.bannedAt=null;
-  cancelSchedule(bots[1].id);
-  bots[1].runQueue(bots[2]); res.json({ok:true});
+  const b=bots[1]; if(!b) return res.status(503).json({ok:false,error:'Compte 1 pas encore démarré'});
+  if(!b.state.ready) return res.status(400).json({ok:false,error:'Non connecté'});
+  b.state.paused=false; b.state.limitReached=false; b.state.bannedAt=null;
+  cancelSchedule(b.id);
+  b.runQueue(otherBot(b)); res.json({ok:true});
 });
 app.post('/api/pause',(req,res)=>{
-  bots[1].state.paused=!bots[1].state.paused;
-  if (bots[1].state.paused) cancelSchedule(bots[1].id);
-  bots[1].log(bots[1].state.paused?'⏸️ Pause (planning annulé si actif)':'▶️ Reprise','warn');
-  res.json({ok:true,paused:bots[1].state.paused});
+  const b=bots[1]; if(!b) return res.status(503).json({ok:false,error:'Compte 1 pas encore démarré'});
+  b.state.paused=!b.state.paused;
+  if (b.state.paused) cancelSchedule(b.id);
+  b.log(b.state.paused?'⏸️ Pause (planning annulé si actif)':'▶️ Reprise','warn');
+  res.json({ok:true,paused:b.state.paused});
 });
-app.post('/api/clear',(req,res)=>{ cancelSchedule(bots[1].id); bots[1].clear(); res.json({ok:true}); });
-app.post('/api/reset',(req,res)=>{ cancelSchedule(bots[1].id); bots[1].reset(); res.json({ok:true}); });
+app.post('/api/clear',(req,res)=>{ const b=bots[1]; if(!b) return res.status(503).json({ok:false}); cancelSchedule(b.id); b.clear(); res.json({ok:true}); });
+app.post('/api/reset',(req,res)=>{ const b=bots[1]; if(!b) return res.status(503).json({ok:false}); cancelSchedule(b.id); b.reset(); res.json({ok:true}); });
 app.get('/api/groups',async(req,res)=>{
-  if(!bots[1].state.ready) return res.json([]);
+  const b=bots[1]; if(!b||!b.state.ready) return res.json([]);
   try {
-    const c=await bots[1].client.getChats();
+    const c=await b.client.getChats();
     res.json(c.filter(x=>x.isGroup).map(x=>({name:x.name,count:x.participants?.length||0})));
   } catch(e) { res.status(500).json({ok:false,error:'Erreur récupération groupes : ' + e.message}); }
 });
@@ -2714,10 +2758,12 @@ app.use((req, res) => {
   });
 });
 
-app.listen(PORT, () => {
-  console.log(`WhatsApp Manager → http://localhost:${PORT}`);
+const HOST = process.env.HOST || '0.0.0.0';
+app.listen(PORT, HOST, () => {
+  console.log(`WhatsApp Manager → http://${HOST}:${PORT}`);
   console.log(`[BUILD] v${APP_VERSION} commit=${BUILD_COMMIT} reset-auth=ok`);
   console.log(`[BOOT] chromium=${CHROMIUM_PATH} exists=${fs.existsSync(CHROMIUM_PATH)} authToken=${AUTH_TOKEN ? 'oui' : 'non'}`);
   if (RESET_AUTH_ON_START.size) console.log(`[RESET_AUTH] Comptes au démarrage : ${[...RESET_AUTH_ON_START].join(', ')}`);
-  if (AUTH_TOKEN) console.log('[BOOT] ⚠️ AUTH_TOKEN actif — le dashboard doit envoyer Authorization: Bearer …');
+  if (AUTH_TOKEN) console.log('[BOOT] ⚠️ AUTH_TOKEN actif — renseignez le token dans Paramètres du dashboard');
+  setImmediate(() => startBots());
 });

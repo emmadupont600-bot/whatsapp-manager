@@ -626,13 +626,18 @@ tr:hover td{background:var(--surface2)}
         <span id="settings-saved" style="font-size:12px;color:var(--green);margin-left:10px;display:none">✓ Sauvegardé</span>
       </div>
       <div class="card">
-        <div class="card-title">Sécurité API (Railway)</div>
-        <p style="font-size:13px;color:var(--muted);margin-bottom:10px">Si la variable <code>AUTH_TOKEN</code> est définie sur Railway, collez la même valeur ici — sinon le dashboard reste vide (401).</p>
+        <div class="card-title">Connexion API (Railway)</div>
+        <p style="font-size:13px;color:var(--muted);margin-bottom:10px">URL actuelle : <code id="diag-origin">—</code> · Test : <span id="diag-ping">—</span></p>
         <div class="form-group">
-          <label>Token API (Bearer)</label>
+          <label>URL du serveur (optionnel)</label>
+          <input type="url" id="set-api-base" placeholder="https://votre-app.up.railway.app (vide = même onglet)">
+        </div>
+        <div class="form-group">
+          <label>Token API (Bearer) — si AUTH_TOKEN sur Railway</label>
           <input type="password" id="set-api-token" placeholder="Identique à AUTH_TOKEN Railway" autocomplete="off">
         </div>
-        <button class="btn btn-ghost" type="button" onclick="saveApiToken()">💾 Enregistrer le token</button>
+        <button class="btn btn-ghost" type="button" onclick="saveApiSettings()">💾 Enregistrer</button>
+        <button class="btn btn-ghost" type="button" onclick="runApiDiagnostic()">🔍 Tester connexion</button>
         <span id="api-token-saved" style="font-size:12px;color:var(--green);margin-left:8px;display:none">✓ OK</span>
       </div>
       <div class="card">
@@ -663,6 +668,15 @@ tr:hover td{background:var(--surface2)}
 
 <script>
 const _nativeFetch = window.fetch.bind(window);
+function getApiBase() {
+  const b = (localStorage.getItem('wa_api_base') || '').trim().replace(/\/$/, '');
+  return b;
+}
+function apiUrl(path) {
+  const p = path.startsWith('/') ? path : '/' + path;
+  const base = getApiBase();
+  return base ? base + p : p;
+}
 function apiHeaders(extra = {}) {
   const h = { ...extra };
   const t = localStorage.getItem('wa_api_token');
@@ -670,10 +684,12 @@ function apiHeaders(extra = {}) {
   return h;
 }
 window.fetch = function(url, opts = {}) {
+  let u = url;
   if (typeof url === 'string' && url.startsWith('/api')) {
+    u = apiUrl(url);
     opts.headers = { ...apiHeaders(), ...(opts.headers || {}) };
   }
-  return _nativeFetch(url, opts);
+  return _nativeFetch(u, opts);
 };
 
 function showApiError(msg) {
@@ -684,14 +700,40 @@ function showApiError(msg) {
   el.innerHTML = `⚠️ <strong>API :</strong> ${escapeHtml(msg)} — vérifiez le token dans Paramètres ou les logs Railway.`;
 }
 
-function saveApiToken() {
+function saveApiSettings() {
+  const base = (document.getElementById('set-api-base')?.value || '').trim().replace(/\/$/, '');
   const v = (document.getElementById('set-api-token')?.value || '').trim();
+  if (base) localStorage.setItem('wa_api_base', base);
+  else localStorage.removeItem('wa_api_base');
   if (v) localStorage.setItem('wa_api_token', v);
   else localStorage.removeItem('wa_api_token');
   const s = document.getElementById('api-token-saved');
   if (s) { s.style.display = 'inline'; setTimeout(() => { s.style.display = 'none'; }, 2000); }
+  runApiDiagnostic();
   fetchStatus();
-  checkHealth();
+}
+
+async function runApiDiagnostic() {
+  const originEl = document.getElementById('diag-origin');
+  const pingEl = document.getElementById('diag-ping');
+  if (originEl) originEl.textContent = window.location.origin + (getApiBase() ? ' → ' + getApiBase() : '');
+  if (!pingEl) return;
+  pingEl.textContent = 'test...';
+  try {
+    const res = await fetch(apiUrl('/api/ping'));
+    const text = await res.text();
+    let j; try { j = JSON.parse(text); } catch (_) { j = null; }
+    if (res.ok && j?.ok) {
+      pingEl.innerHTML = `<span class="badge badge-green">OK commit ${escapeHtml(j.commit || '?')}</span>`;
+      showApiError('');
+    } else {
+      pingEl.innerHTML = `<span class="badge badge-red">HTTP ${res.status}</span>`;
+      showApiError(j?.error || `Ping HTTP ${res.status}`);
+    }
+  } catch (e) {
+    pingEl.innerHTML = '<span class="badge badge-red">Échec réseau</span>';
+    showApiError(`${e.message || e} — ouvrez l’URL Railway directement (pas un fichier local)`);
+  }
 }
 
 function paintLogs(r) {
@@ -709,17 +751,23 @@ function paintLogs(r) {
 }
 
 async function checkHealth() {
+  await runApiDiagnostic();
   try {
-    const h = await fetch('/api/health').then(r => r.json());
+    const res = await fetch(apiUrl('/api/health'));
+    const h = await res.json();
+    if (!res.ok) {
+      showApiError(h.error || `Health HTTP ${res.status}`);
+      return;
+    }
     if (h.authTokenRequired && !localStorage.getItem('wa_api_token')) {
       showApiError('AUTH_TOKEN requis — renseignez le token dans Paramètres');
     } else if (!h.chromiumExists) {
-      showApiError(`Chromium introuvable (${h.chromiumPath}) — rebuild Docker`);
-    } else {
-      showApiError('');
+      showApiError(`Chromium introuvable (${h.chromiumPath}) — normal en local, OK sur Railway Docker`);
     }
   } catch (e) {
-    showApiError('Serveur injoignable — déploiement Railway en cours ?');
+    if (!document.getElementById('api-error-banner')?.textContent) {
+      showApiError(`Health : ${e.message || e}`);
+    }
   }
 }
 
@@ -1513,7 +1561,7 @@ async function fetchStatus() {
     else showApiError('');
     applyStatus(r);
   } catch(e) {
-    showApiError('Impossible de joindre /api/status — serveur arrêté ou URL incorrecte');
+    showApiError(`Réseau : ${e.message || e} — URL=${apiUrl('/api/' + currentAccount + '/status')} — Paramètres → Tester connexion`);
   }
   const other = currentAccount === 1 ? 2 : 1;
   try {
@@ -2238,10 +2286,13 @@ loadQuotaDisplayPref();
   dt.value = d.toISOString().slice(0,16);
 })();
 
-(function initApiTokenField() {
-  const inp = document.getElementById('set-api-token');
-  if (inp) inp.value = localStorage.getItem('wa_api_token') || '';
+(function initApiSettingsFields() {
+  const tok = document.getElementById('set-api-token');
+  const base = document.getElementById('set-api-base');
+  if (tok) tok.value = localStorage.getItem('wa_api_token') || '';
+  if (base) base.value = localStorage.getItem('wa_api_base') || '';
 })();
+runApiDiagnostic();
 checkHealth();
 fetchStatus();
 setInterval(fetchStatus, 2000);
