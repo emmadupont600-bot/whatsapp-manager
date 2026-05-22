@@ -8,7 +8,7 @@ const path     = require('path');
 const csv      = require('csv-parse/sync');
 const { stringify } = require('csv-stringify/sync');
 const ai = require('./lib/ai');
-const { isPositiveReply, isNegativeReply, isPositiveReaction } = require('./lib/replies');
+const { isPositiveReply, isNegativeReply, isPositiveReaction, classifyOptInReply } = require('./lib/replies');
 
 process.on('unhandledRejection', (reason) => console.error('[FATAL] Unhandled rejection:', reason));
 process.on('uncaughtException',  (err)    => console.error('[FATAL] Uncaught exception:',  err));
@@ -1671,7 +1671,7 @@ class BotAccount {
   }
 
   async _sendPendingLink(contact, phoneDigits) {
-    const link = (contact.link || '').trim();
+    const link = (contact.link || this.state.campaign?.link || '').trim();
     if (!link || contact.linkSent) return false;
     const number = phoneDigits.replace(/\D/g, '');
     const cusChatId = normalizeOutboundChatId(`${number}@c.us`, number);
@@ -1710,21 +1710,34 @@ class BotAccount {
       contact.replyText = body.substring(0, 200);
       this.state.repliesReceived++;
       this._saveQueue();
-      if (isNegativeReply(body)) {
+
+      const intent = classifyOptInReply(body);
+      if (intent === 'negative') {
         contact.status = 'declined';
         contact.awaitingLink = false;
+        contact.optInResult = 'no';
         this._saveQueue(true);
-        this.log(`👎 Réponse négative de +${phone} — pas de lien`, 'warn');
+        this.log(`🚫 +${phone} a dit non — aucun lien envoyé`, 'warn');
         return;
       }
-      if (isPositiveReply(body)) {
-        this.log(`👍 Réponse positive de +${phone} — envoi du lien`, 'success');
-        try { await this._sendPendingLink(contact, phone); } catch (e) {
+      if (intent === 'positive') {
+        const link = (contact.link || this.state.campaign?.link || '').trim();
+        if (!link) {
+          this.log(`⚠️ +${phone} a dit oui mais aucun lien configuré dans la campagne`, 'error');
+          return;
+        }
+        this.log(`✅ +${phone} a dit oui — envoi du lien`, 'success');
+        try {
+          const sent = await this._sendPendingLink(contact, phone);
+          if (sent) contact.optInResult = 'yes';
+        } catch (e) {
           this.log(`❌ Lien non envoyé à +${phone} : ${e.message}`, 'error');
         }
+        this._saveQueue(true);
         return;
       }
-      this.log(`💬 Réponse de +${phone} (non positive) : "${contact.replyText}"`, 'info');
+      contact.optInResult = 'pending';
+      this.log(`💬 +${phone} : réponse ambiguë — pas de lien ("${contact.replyText}")`, 'info');
       return;
     }
     if (contact.status === 'done') {
@@ -1801,9 +1814,10 @@ class BotAccount {
     if (!(await this._waitForHourlyCapacity(msgCount))) {
       throw new Error('Envoi annulé : limite horaire');
     }
-    if (hasLink) {
-      this.log('💬 Question envoyée — lien après réponse positive uniquement', 'info');
+    if (!hasLink) {
+      throw new Error('Lien de campagne requis — renseignez le champ « Lien du groupe » dans Import (envoyé seulement si la personne dit oui)');
     }
+    this.log('💬 Question envoyée — si oui → lien · si non → rien', 'info');
     if (useOpener && openerText) {
       this.log(`👋 Envoi Hey (${openerText})...`, 'info');
       await sleep(rand(400, 1200));
@@ -2074,7 +2088,7 @@ class BotAccount {
         phone, status: 'pending', prenom: prenom.trim(), nom: nom.trim(),
         message: msg,
         messageOriginal: (campaignOpts.messageOriginal || msg).trim(),
-        link: (row.link || defaultLink || '').trim(),
+        link: (row.link || defaultLink || this.state.campaign?.link || '').trim(),
         aiSpin, awaitingLink: false, linkSent: false,
         addedAt: new Date().toISOString(),
       });
@@ -2338,7 +2352,8 @@ app.post('/api/:account/prepare-campaign', async (req, res) => {
   const pitch = (req.body.message || '').trim();
   const link = (req.body.link || '').trim();
   const aiSpin = req.body.aiSpin !== false;
-  if (!pitch) return res.status(400).json({ ok: false, error: 'Message requis' });
+  if (!pitch) return res.status(400).json({ ok: false, error: 'Message (question) requis' });
+  if (!link) return res.status(400).json({ ok: false, error: 'Lien du groupe requis — envoyé uniquement si la personne répond oui' });
   let question = pitch;
   let aiQuestionUsed = false;
   if (link && ai.isAiEnabled()) {
@@ -2372,7 +2387,8 @@ app.post('/api/:account/import', upload.single('file'), (req,res)=>{
     const content=fs.readFileSync(req.file.path,'utf-8');
     const message=(req.body.message||'').trim();
     const link=(req.body.link||'').trim();
-    if(!message && !link) return res.status(400).json({ok:false,error:'Message ou lien requis'});
+    if(!message) return res.status(400).json({ok:false,error:'Message (question) requis'});
+    if(!link) return res.status(400).json({ok:false,error:'Lien du groupe requis — envoyé si oui, rien si non'});
     if (!bot.state.campaign) bot.setCampaign({ messageOriginal, message, link, aiSpin });
     else { bot.state.campaign.message = message; bot.state.campaign.link = link; }
     result=bot.importCSV(content, message, link, forceInclude, { messageOriginal, aiSpin });

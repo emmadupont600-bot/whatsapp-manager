@@ -325,15 +325,19 @@ tr:hover td{background:var(--surface2)}
           <textarea id="import-message" placeholder="Bonjour {prénom} 👋 j'ai pensé à toi pour cette opportunité..." oninput="updatePreview()"></textarea>
           <div class="msg-count" id="msg-count">0 caractères</div>
         </div>
-        <div class="form-group">
-          <label>Lien à envoyer (optionnel)</label>
-          <input type="url" id="import-link" placeholder="https://ton-lien.com" oninput="updatePreview()">
-          <div class="link-info" id="link-info" style="display:none">🔗 <span id="link-info-text">Le lien part <strong>uniquement après une réponse positive</strong>.</span></div>
+        <div class="form-group" style="background:color-mix(in oklch,var(--green) 8%,var(--surface));border:1px solid color-mix(in oklch,var(--green) 30%,var(--border));border-radius:8px;padding:12px">
+          <label>Lien du groupe * <span style="font-weight:400;color:var(--muted)">(WhatsApp, invite, etc.)</span></label>
+          <input type="url" id="import-link" placeholder="https://chat.whatsapp.com/..." oninput="updatePreview()" required>
+          <div class="link-info" id="link-info" style="display:flex;margin-top:8px">🔗 <span id="link-info-text"></span></div>
+          <p style="font-size:11px;color:var(--muted);margin:8px 0 0;line-height:1.5">
+            <strong>Oui</strong> (oui, ok, chaud, envoie…) → le bot envoie ce lien.<br>
+            <strong>Non</strong> (non, pas intéressé, stop…) → <strong>aucun message</strong> de plus.
+          </p>
           <div id="import-msg-wa-count" style="font-size:11px;color:var(--muted);margin-top:6px"></div>
         </div>
         <div class="form-group" style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border)">
           <div class="card-title" style="margin-bottom:10px">🤖 IA (Groq)</div>
-          <p style="font-size:12px;color:var(--muted);margin-bottom:10px">1 question par contact — plus d'envoi texte puis lien d'affilée. Lien après opt-in (oui, chaud, 👍).</p>
+          <p style="font-size:12px;color:var(--muted);margin-bottom:10px">1 question par contact. Le lien ci-dessus n'est jamais envoyé tout de suite.</p>
           <label style="display:flex;align-items:flex-start;gap:8px;font-size:13px;margin-bottom:12px;cursor:pointer">
             <input type="checkbox" id="ai-spin-mode" checked onchange="updatePreview()" style="margin-top:3px">
             <span><strong>Spin IA</strong> — 1er contact = texte validé ; suivants = variantes Groq</span>
@@ -1715,7 +1719,8 @@ async function prepareCampaign() {
   const link = document.getElementById('import-link').value.trim();
   const statusEl = document.getElementById('prepare-status');
   const btn = document.getElementById('btn-prepare-campaign');
-  if (!pitch) { statusEl.innerHTML = '<span class="badge badge-red">Message requis</span>'; return; }
+  if (!pitch) { statusEl.innerHTML = '<span class="badge badge-red">Question / message requis</span>'; return; }
+  if (!link) { statusEl.innerHTML = '<span class="badge badge-red">Lien du groupe requis (envoyé seulement si oui)</span>'; return; }
   btn.disabled = true;
   statusEl.textContent = '⏳ Groq en cours...';
   try {
@@ -1731,7 +1736,7 @@ async function prepareCampaign() {
     window._campaignMessageOriginal = r.message || pitch;
     if (r.message) document.getElementById('import-message').value = r.message;
     let note = r.aiQuestionUsed ? `✅ Question IA (${r.aiProvider || 'Groq'})` : (r.aiEnabled ? '✅ Validé' : '⚠️ Ajoutez GROQ_API_KEY sur Railway');
-    if (link) note += ' · Lien après réponse +';
+    if (link) note += ' · Oui → lien · Non → rien';
     if (r.aiSpin && r.aiEnabled) note += ' · Spin actif';
     statusEl.innerHTML = `<span class="badge badge-green">${note}</span>`;
     updatePreview();
@@ -1872,7 +1877,8 @@ async function confirmDuplicatesAll() {
 async function importAllCSV() {
   const message = document.getElementById('import-message').value.trim();
   const link    = document.getElementById('import-link').value.trim();
-  if (!message && !link) { document.getElementById('import-result').innerHTML='<span class="badge badge-red">⚠️ Message ou lien requis</span>'; return; }
+  if (!message) { document.getElementById('import-result').innerHTML='<span class="badge badge-red">⚠️ Message (question) requis</span>'; return; }
+  if (!link) { document.getElementById('import-result').innerHTML='<span class="badge badge-red">⚠️ Lien du groupe requis</span>'; return; }
   if (!pendingCSVFiles.length) return;
 
   document.getElementById('dup-confirm-box').style.display = 'none';
@@ -1935,10 +1941,16 @@ function updatePreview() {
   else { p.style.color='var(--muted)'; p.textContent='Votre message apparaîtra ici...'; }
   const linkWrap = document.getElementById('link-preview-wrap');
   const linkInfo = document.getElementById('link-info');
+  const linkInfoText = document.getElementById('link-info-text');
   if (link) {
     linkInfo.style.display='flex';
-    linkWrap.innerHTML = `<div class="link-preview-box">🔗 <a href="${link}" target="_blank" rel="noopener">${link}</a> <span style="font-size:11px;color:var(--muted)">(après opt-in)</span></div>`;
-  } else { linkInfo.style.display='none'; linkWrap.innerHTML=''; }
+    if (linkInfoText) linkInfoText.textContent = 'Ce lien sera envoyé uniquement si la personne répond oui.';
+    linkWrap.innerHTML = `<div class="link-preview-box">🔗 <a href="${link}" target="_blank" rel="noopener">${link}</a></div>`;
+  } else {
+    linkInfo.style.display='flex';
+    if (linkInfoText) linkInfoText.textContent = 'Ajoutez le lien du groupe (obligatoire).';
+    linkWrap.innerHTML = '';
+  }
 }
 
 /* ═══════════════════════════════════════════════════
