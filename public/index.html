@@ -580,6 +580,11 @@ tr:hover td{background:var(--surface2)}
             <li>Scannez le QR code ci-contre</li>
             <li>Connexion automatique ✅</li>
           </ol>
+          <div id="conn-status-line" style="margin-top:14px;font-size:12px;color:var(--muted)"></div>
+          <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
+            <button class="btn btn-ghost" type="button" onclick="resetAuthSession()" id="btn-reset-auth">🔑 Nouveau QR (reset session)</button>
+            <button class="btn btn-ghost" type="button" onclick="checkSession()" id="btn-check-session">🔄 Vérifier session</button>
+          </div>
         </div>
       </div>
     </div>
@@ -1131,16 +1136,22 @@ function refreshConnUI(acct) {
   }
   if (acct === currentAccount && document.getElementById('page-connection').classList.contains('active')) {
     const r = lastStatus[acct];
-    if (r) updateQR(r.qr, ready, acct);
+    if (r) updateQR(r, acct);
   }
 }
 
 /* ═══════════════════════════════════════════════════
    NAVIGATION
 ═══════════════════════════════════════════════════ */
+function connectionReady(r) {
+  return !!(r && r.ready && r.sessionHealthy !== false && !r.resettingAuth);
+}
+
 function switchAccount(n) {
   currentAccount = n;
-  if (document.getElementById('page-dashboard').classList.contains('active')) {
+  const onDash = document.getElementById('page-dashboard').classList.contains('active');
+  const onConn = document.getElementById('page-connection').classList.contains('active');
+  if (onDash || onConn) {
     const cached = lastStatus[n];
     if (cached) applyStatus(cached);
     else fetchStatus();
@@ -1212,7 +1223,7 @@ function applyStatus(r) {
   }
 
   const readyShown = getStableReady(acct, !!r.ready);
-  updateQR(r.qr, readyShown, acct);
+  updateQR(r, acct);
   paintConnBadge(acct, readyShown);
 
   if (!document.getElementById('page-dashboard').classList.contains('active')) return;
@@ -1320,32 +1331,96 @@ function applyStatus(r) {
   }).join('');
 }
 
-function updateQR(qr, ready, acct) {
-  // Ne rien faire si on n'est pas sur la page connexion du bon compte
+function escapeHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function paintConnStatusLine(r) {
+  const el = document.getElementById('conn-status-line');
+  if (!el || !r) return;
+  if (r.resettingAuth) {
+    el.innerHTML = '<span class="badge badge-yellow">⏳ Réinitialisation session — nouveau QR imminent</span>';
+    return;
+  }
+  if (r.initializing) {
+    el.innerHTML = '<span class="badge badge-blue">⏳ Initialisation WhatsApp Web...</span>';
+    return;
+  }
+  if (connectionReady(r)) {
+    el.innerHTML = '<span class="badge badge-green">✓ Session active</span>';
+    return;
+  }
+  if (r.ready && r.sessionHealthy === false) {
+    el.innerHTML = '<span class="badge badge-red">⚠ Session invalide — cliquez « Nouveau QR »</span>';
+    return;
+  }
+  if (r.lastInitError) {
+    el.innerHTML = `<span class="badge badge-red">Erreur : ${escapeHtml(String(r.lastInitError).slice(0, 120))}</span>`;
+    return;
+  }
+  if (r.qr) {
+    el.innerHTML = '<span class="badge badge-yellow">📱 Scannez le QR avec WhatsApp</span>';
+    return;
+  }
+  el.innerHTML = '<span class="badge badge-blue">⌛ En attente du QR (~30–90 s)</span>';
+}
+
+function updateQR(r, acct) {
   if (!document.getElementById('page-connection').classList.contains('active')) return;
   if (currentAccount !== acct) return;
+  if (!r) return;
 
+  paintConnStatusLine(r);
   const wrap = document.getElementById('qr-wrap');
+  const ready = connectionReady(r);
 
   if (ready) {
     wrap.innerHTML = `<div class="qr-placeholder" style="color:var(--green);border-color:var(--green)">
       ✅ WhatsApp Connecté !</div>
       <span class="qr-badge connected"><span class="dot"></span>Connecté</span>`;
-    lastQr[acct] = null; // reset pour regen si déco
-  } else if (qr) {
-    if (qr !== lastQr[acct]) {
-      lastQr[acct] = qr;
-      // Détecter si c'est du base64 ou une URL
-      const src = qr.startsWith('data:') ? qr : `data:image/png;base64,${qr}`;
+    lastQr[acct] = null;
+  } else if (r.ready && r.sessionHealthy === false) {
+    wrap.innerHTML = `<div class="qr-placeholder" style="color:var(--red);border-color:var(--red)">
+      ⚠️ Session WhatsApp invalide<br>
+      <small style="margin-top:8px;display:block">Utilisez « Nouveau QR » pour reconnecter</small></div>`;
+    lastQr[acct] = null;
+  } else if (r.resettingAuth || r.initializing) {
+    wrap.innerHTML = `<div class="qr-placeholder">⌛ ${r.resettingAuth ? 'Réinitialisation...' : 'Initialisation...'}<br>
+      <small style="margin-top:8px;display:block">Patientez 30–90 s</small></div>`;
+    lastQr[acct] = null;
+  } else if (r.qr) {
+    if (r.qr !== lastQr[acct]) {
+      lastQr[acct] = r.qr;
+      const src = r.qr.startsWith('data:') ? r.qr : `data:image/png;base64,${r.qr}`;
       wrap.innerHTML = `<img src="${src}" alt="QR" style="border-radius:var(--radius);background:#fff;padding:10px;width:220px;height:220px">
         <span class="qr-badge scanning">Scannez maintenant</span>`;
     }
   } else {
-    // Pas encore de QR
     wrap.innerHTML = `<div class="qr-placeholder">Génération QR...<br>
-      <small style="margin-top:8px;display:block">~30 secondes</small></div>`;
+      <small style="margin-top:8px;display:block">~30–90 secondes · si bloqué : Nouveau QR</small></div>`;
     lastQr[acct] = null;
   }
+}
+
+async function resetAuthSession() {
+  if (!confirm(`Réinitialiser la session du compte ${currentAccount} ?\n\nCela supprime la connexion actuelle et affiche un nouveau QR.`)) return;
+  const btn = document.getElementById('btn-reset-auth');
+  if (btn) btn.disabled = true;
+  document.getElementById('qr-wrap').innerHTML = '<div class="qr-placeholder">⌛ Reset en cours...</div>';
+  const r = await fetch(`/api/${currentAccount}/reset-auth`, { method: 'POST' }).then(x => x.json()).catch(() => ({ ok: false }));
+  if (btn) btn.disabled = false;
+  if (!r.ok) alert(r.error || 'Échec du reset');
+  else {
+    lastQr[currentAccount] = null;
+    fetchStatus();
+  }
+}
+
+async function checkSession() {
+  const r = await fetch(`/api/${currentAccount}/check-session`, { method: 'POST' }).then(x => x.json()).catch(() => ({ ok: false }));
+  if (r.ok) alert('Session OK');
+  else alert(r.error || 'Session non synchronisée — utilisez Nouveau QR');
+  fetchStatus();
 }
 async function fetchStatus() {
   try {

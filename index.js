@@ -322,9 +322,7 @@ function whatsappMsgId(msg) {
 }
 
 const URL_RE = /(https?:\/\/[^\s]+)/i;
-function useSplitLinkMessages() {
-  return process.env.SPLIT_LINK_MESSAGE === '1';
-}
+const QR_WATCHDOG_MS = parseInt(process.env.QR_WATCHDOG_MS || '120000', 10);
 
 /** Texte et lien toujours séparés — le lien part après opt-in (réponse positive). */
 function prepareOutboundContent(rawMsg, link) {
@@ -611,10 +609,6 @@ function shouldUseManualOpener(phoneDigits, isColdContact) {
   if (process.env.COLD_OPENER_MESSAGE === '0') return false;
   if (process.env.OPENER_SKIP_IF_SENT === '1' && phoneHadSuccessfulSend(phoneDigits)) return false;
   return true;
-}
-
-function useManualRouteSplit() {
-  return process.env.MANUAL_ROUTE_SPLIT !== '0';
 }
 
 function phoneToCusChatId(number) {
@@ -1256,6 +1250,8 @@ class BotAccount {
     this._consecutiveRejects = 0;
     this._initializing   = false;
     this._postReadyScheduled = false;
+    this._qrWatchdogTimer = null;
+    this._lastInitError = null;
     this.state = {
       qr: null, ready: false, running: false, paused: false, sessionHealthy: null,
       queue: [], sessionCount: 0,
@@ -1451,6 +1447,8 @@ class BotAccount {
 
   _handleGhostSession(err) {
     this.state.sessionHealthy = false;
+    this.state.ready = false;
+    this.state.qr = null;
     this.state.running = false;
     this.state.paused = true;
     this._queueLoopActive = false;
@@ -1483,9 +1481,27 @@ class BotAccount {
     }
   }
 
+  _clearQrWatchdog() {
+    if (this._qrWatchdogTimer) {
+      clearTimeout(this._qrWatchdogTimer);
+      this._qrWatchdogTimer = null;
+    }
+  }
+
+  _scheduleQrWatchdog() {
+    this._clearQrWatchdog();
+    if (!QR_WATCHDOG_MS || QR_WATCHDOG_MS < 30000) return;
+    this._qrWatchdogTimer = setTimeout(() => {
+      this._qrWatchdogTimer = null;
+      if (this._resettingAuth || this.state.ready || this.state.qr || this._initializing) return;
+      this.log('⚠️ Aucun QR après attente — réinitialisation automatique de la session', 'warn');
+      this.resetAuth().catch(e => this.log(`❌ Watchdog reset : ${e.message}`, 'error'));
+    }, QR_WATCHDOG_MS);
+  }
+
   _makeClient() {
     const takeover = process.env.TAKEOVER_ON_CONFLICT === '1';
-    const cacheType = (process.env.WA_WEB_CACHE_TYPE || 'none').toLowerCase();
+    const cacheType = (process.env.WA_WEB_CACHE_TYPE || 'remote').toLowerCase();
     let webVersionCache = { type: 'none' };
     const clientExtra = {};
     if (cacheType === 'remote') {
@@ -1516,10 +1532,22 @@ class BotAccount {
 
   _bindEvents(c) {
     c.on('qr', async qr => {
-      this.retryCount = 0; this.state.qr = await qrcode.toDataURL(qr); this.state.ready = false;
-      this.log('QR Code généré — scannez-le sur le dashboard', 'warn');
+      this._clearQrWatchdog();
+      this.retryCount = 0;
+      this.state.qr = await qrcode.toDataURL(qr);
+      this.state.ready = false;
+      this.state.sessionHealthy = null;
+      this.log('QR Code généré — scannez-le sur le dashboard (onglet Connexion)', 'warn');
+    });
+    c.on('loading_screen', (pct, msg) => {
+      if (pct === 0 || pct === 100) this.log(`Chargement WA Web : ${msg || pct + '%'}`, 'info');
+    });
+    c.on('authenticated', () => {
+      this._clearQrWatchdog();
+      this.log('Authentification réussie — finalisation connexion...', 'info');
     });
     c.on('ready', async () => {
+      this._clearQrWatchdog();
       this.retryCount = 0; this.state.ready = true; this.state.qr = null;
       if (this._postReadyScheduled) return;
       this._postReadyScheduled = true;
@@ -1555,12 +1583,28 @@ class BotAccount {
       }
     });
     c.on('disconnected', reason => {
-      this.state.ready = false; this.state.running = false;
+      this.state.ready = false;
+      this.state.qr = null;
+      this.state.sessionHealthy = null;
+      this.state.running = false;
       this._postReadyScheduled = false;
       this.log(`WhatsApp déconnecté : ${reason}`, 'error');
-      if (!this._resettingAuth) this._scheduleRetry(reason === 'LOGOUT' ? 30000 : 8000);
+      if (!this._resettingAuth) {
+        this._scheduleQrWatchdog();
+        this._scheduleRetry(reason === 'LOGOUT' ? 30000 : 8000);
+      }
     });
-    c.on('auth_failure', msg => this.log(`Erreur auth : ${msg}`, 'error'));
+    c.on('auth_failure', msg => {
+      this.state.ready = false;
+      this.state.qr = null;
+      this.state.sessionHealthy = false;
+      this._postReadyScheduled = false;
+      this.log(`Erreur auth : ${msg} — nouvelle tentative`, 'error');
+      if (!this._resettingAuth) {
+        this._clearQrWatchdog();
+        this._scheduleRetry(10000);
+      }
+    });
   }
 
   async _destroyClient() {
@@ -1584,6 +1628,7 @@ class BotAccount {
   async _initClient() {
     if (this._initializing || this._resettingAuth) return;
     this._initializing = true;
+    this._clearQrWatchdog();
     try {
       await this._destroyClient();
       removeLocks(this.authPath);
@@ -1591,8 +1636,11 @@ class BotAccount {
       this._bindEvents(this.client);
       await withTimeout(this.client.initialize(), 180000, 'WhatsApp.initialize()');
       this.retryCount = 0;
+      this._lastInitError = null;
+      if (!this.state.ready && !this.state.qr) this._scheduleQrWatchdog();
     } catch (err) {
       const msg = err.message || String(err);
+      this._lastInitError = msg;
       const nav = isPuppeteerNavigationError(msg);
       this.log(`Erreur initialisation : ${msg}${nav ? ' (rechargement WA Web — nouvelle tentative)' : ''}`, 'error');
       await this._destroyClient();
@@ -1605,6 +1653,7 @@ class BotAccount {
   // ─── FIX PRINCIPAL : resetAuth supprime la session et force un nouveau QR ────
   async resetAuth() {
     this._resettingAuth = true;
+    this._clearQrWatchdog();
     this.state.ready    = false;
     this.state.running  = false;
     this.state.qr       = null;
@@ -2122,8 +2171,11 @@ class BotAccount {
     return {
       id:this.id, ready:this.state.ready, qr:this.state.qr,
       running:this.state.running, paused:this.state.paused,
+      initializing: this._initializing,
       resettingAuth: this._resettingAuth,
       sessionHealthy: this.state.sessionHealthy,
+      lastInitError: this._lastInitError,
+      waWebCacheType: (process.env.WA_WEB_CACHE_TYPE || 'remote').toLowerCase(),
       waWebVersion: WA_WEB_VERSION,
       stats:this.state.stats,
       pending: pendingList.length, pendingWhatsAppMessages, pendingWithDoubleMessage,
@@ -2201,7 +2253,7 @@ app.get('/api/health', (req, res) => {
     ok: true,
     version: APP_VERSION,
     commit: BUILD_COMMIT,
-    features: { resetAuth: true, ghostDetection: true, messageAck: true, combinedLinkMessage: !useSplitLinkMessages(), coldContactSync: true, manualSearchFlow: true, coldOpener: true, ackColdSoft: false, manualSearchDom: true, manualRouteSplit: true, uiSendAll: true, uiRetryOnAck: true, storeSend: true },
+    features: { resetAuth: true, ghostDetection: true, messageAck: true, optInLinkFlow: true, coldContactSync: true, manualSearchFlow: MANUAL_SEARCH_FLOW, coldOpener: !!getColdOpenerText(), aiSpin: true, storeSend: true },
     resetAuthOnStart: [...RESET_AUTH_ON_START],
     uptimeSec: Math.round(process.uptime()),
   });
