@@ -476,26 +476,127 @@ function withTimeout(p, ms, label) {
   });
 }
 
-async function getContactName(client, userId, timeoutMs = 5000) {
-  const chatId  = `${userId}@c.us`;
-  const extract = contact => {
-    const parts = (contact.pushname || contact.name || '').trim().split(/\s+/);
-    return { prenom: parts[0] || '', nom: parts.slice(1).join(' ') || '' };
-  };
+function normalizeCsvHeaderKey(key) {
+  return String(key || '')
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+}
+
+function rowField(row, ...aliases) {
+  if (!row || typeof row !== 'object') return '';
+  const map = {};
+  for (const [k, v] of Object.entries(row)) {
+    map[normalizeCsvHeaderKey(k)] = v;
+  }
+  for (const alias of aliases) {
+    const val = map[normalizeCsvHeaderKey(alias)];
+    if (val !== undefined && val !== null && String(val).trim() !== '') return String(val).trim();
+  }
+  return '';
+}
+
+function parseContactRowFields(row) {
+  const phone = rowField(row,
+    'telephone', 'téléphone', 'phone', 'mobile', 'numero', 'numéro', 'tel'
+  ).replace(/\D/g, '');
+  const prenom = rowField(row, 'prenom', 'prénom', 'firstname', 'first_name', 'prénom', 'prenom');
+  const nom = rowField(row, 'nom', 'name', 'lastname', 'last_name', 'nom de famille');
+  const email = rowField(row,
+    'email', 'e-mail', 'mail', 'adresse e-mail du contact (obligatoire)',
+    'adresse email du contact (obligatoire)', 'adresse email', 'courriel'
+  );
+  let newsletter = rowField(row,
+    'newsletter', 'inscription newsletter', 'inscription a la newsletter (obligatoire)',
+    'inscription à la newsletter (obligatoire)', 'inscription newsletter (obligatoire)'
+  );
+  if (!newsletter) newsletter = (process.env.EXPORT_NEWSLETTER_DEFAULT || 'oui').trim();
+  return { phone, prenom, nom, email, newsletter };
+}
+
+async function fetchContactEmailFromStore(client, userId) {
+  const page = client.pupPage;
+  if (!page) return '';
   try {
-    return extract(await withTimeout(client.getContactById(chatId), timeoutMs, userId));
+    return await page.evaluate((phone) => {
+      try {
+        const WidFactory = window.require('WAWebWidFactory');
+        const Contact = window.require('WAWebCollections').Contact;
+        const wid = WidFactory.createWid(phone + '@c.us');
+        const c = Contact.get(wid);
+        if (!c) return '';
+        const candidates = [
+          c.email,
+          c.bizEmail,
+          c.businessProfile?.email,
+          c.businessProfile?.businessEmail,
+        ];
+        for (const e of candidates) {
+          if (e && String(e).includes('@')) return String(e).trim();
+        }
+      } catch (_) {}
+      return '';
+    }, userId);
   } catch (_) {
-    await sleep(800);
-    try {
-      return extract(await withTimeout(client.getContactById(chatId), timeoutMs, `${userId} retry`));
-    } catch (err) {
-      console.warn(`[export-group] ⚠️  ${userId} ignoré : ${err.message}`);
-      return { prenom: '', nom: '' };
-    }
+    return '';
   }
 }
 
+async function getContactProfile(client, userId, timeoutMs = 5000) {
+  const chatId = `${userId}@c.us`;
+  const phone = String(userId).replace(/\D/g, '');
+  const extract = (contact) => {
+    const display = (contact.name || contact.shortName || contact.pushname || contact.verifiedName || '').trim();
+    const parts = display.split(/\s+/).filter(Boolean);
+    return {
+      prenom: parts[0] || '',
+      nom: parts.slice(1).join(' ') || '',
+      phone,
+    };
+  };
+  let profile = { prenom: '', nom: '', phone, email: '' };
+  let contact = null;
+  try {
+    contact = await withTimeout(client.getContactById(chatId), timeoutMs, userId);
+    profile = { ...profile, ...extract(contact) };
+  } catch (_) {
+    await sleep(800);
+    try {
+      contact = await withTimeout(client.getContactById(chatId), timeoutMs, `${userId} retry`);
+      profile = { ...profile, ...extract(contact) };
+    } catch (err) {
+      console.warn(`[export-group] ⚠️  ${userId} profil partiel : ${err.message}`);
+    }
+  }
+  const storeEmail = await fetchContactEmailFromStore(client, userId);
+  if (storeEmail) profile.email = storeEmail;
+  if (!profile.email && contact?.isBusiness) {
+    try {
+      const biz = await withTimeout(contact.getBusinessProfile(), timeoutMs, `biz ${userId}`);
+      const be = (biz?.email || biz?.businessProfile?.email || '').trim();
+      if (be.includes('@')) profile.email = be;
+    } catch (_) {}
+  }
+  return profile;
+}
+
+function emailForGroupExport(phone, waEmail, fallbackTemplate) {
+  const e = (waEmail || '').trim();
+  if (e && e.includes('@')) return e;
+  const tpl = (fallbackTemplate || process.env.GROUP_EXPORT_EMAIL_FALLBACK || '').trim();
+  if (tpl) return tpl.replace(/\{phone\}/g, phone);
+  return '';
+}
+
 const EXPORT_GROUP_INTER_DELAY_MS = parseInt(process.env.EXPORT_GROUP_DELAY_MS || '120');
+const EXPORT_GROUP_CSV_HEADERS = [
+  'Adresse e-mail du contact (obligatoire)',
+  'Téléphone',
+  'Prénom',
+  'Nom',
+  'Inscription à la newsletter (obligatoire)',
+];
 
 async function safeIsRegisteredUser(client, chatId, logger) {
   try {
@@ -2237,10 +2338,12 @@ class BotAccount {
     let added=0, blacklisted=0, skippedQueue=0;
     const duplicates=[];
     for (const row of records) {
-      const phone=(row.telephone||row.phone||row['Telephone']||row['Phone']||Object.values(row)[0]||'').replace(/\D/g,'');
+      const parsed = parseContactRowFields(row);
+      const phone = parsed.phone || rowField(row, 'telephone', 'phone').replace(/\D/g, '')
+        || String(Object.values(row)[0] || '').replace(/\D/g, '');
       if (!phone||phone.length<8) continue;
-      const prenom=row.prenom||row.prénom||row.firstname||row.first_name||row.Prenom||row['Prénom']||'';
-      const nom=row.nom||row.name||row.lastname||row.last_name||row.Nom||row['Nom']||'';
+      const prenom = parsed.prenom;
+      const nom = parsed.nom;
       if (isBlacklisted(phone, blacklistCache)) { blacklisted++; continue; }
       if (this.state.queue.find(c=>c.phone.replace(/\D/g,'')=== phone)) { skippedQueue++; continue; }
       const histEntry = getHistoryEntry(phone, sentHistoryCache);
@@ -2257,6 +2360,8 @@ class BotAccount {
       );
       this.state.queue.push({
         phone, status: 'pending', prenom: prenom.trim(), nom: nom.trim(),
+        email: parsed.email || '',
+        newsletter: parsed.newsletter || 'oui',
         message: msg,
         messageOriginal: (campaignOpts.messageOriginal || msg).trim(),
         link: (row.link || defaultLink || this.state.campaign?.link || '').trim(),
@@ -2799,17 +2904,29 @@ app.get('/api/:account/export-group/:name', async (req, res) => {
   if (!group) return res.status(404).json({ ok: false, error: 'Groupe introuvable' });
   const participants = group.participants || [];
   const total        = participants.length;
-  console.log(`[export-group] 📤 "${groupName}" — ${total} participants`);
+  const newsletterValue = (req.query.newsletter || process.env.EXPORT_NEWSLETTER_DEFAULT || 'oui').trim();
+  const emailFallback = (req.query.emailFallback || process.env.GROUP_EXPORT_EMAIL_FALLBACK || '').trim();
+  const phonePrefix = req.query.phonePrefix === '0' ? '' : '+';
+  console.log(`[export-group] 📤 "${groupName}" — ${total} participants · newsletter=${newsletterValue}`);
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(groupName)}.csv"`);
-  res.write('telephone,prenom,nom,admin\n');
+  const esc = v => `"${(v || '').replace(/"/g, '""')}"`;
+  res.write('\uFEFF' + EXPORT_GROUP_CSV_HEADERS.map(esc).join(',') + '\n');
   for (let i = 0; i < participants.length; i++) {
     if (res.writableEnded) { console.log(`[export-group] ⚠️ Connexion client fermée à ${i}/${total}, export annulé`); return; }
     const p = participants[i];
     if (i > 0 && i % 25 === 0) console.log(`[export-group] ⏳ ${i}/${total} traités...`);
-    const { prenom, nom } = await getContactName(bot.client, p.id.user);
-    const esc = v => `"${(v||'').replace(/"/g,'""')}"`;
-    res.write(`+${p.id.user},${esc(prenom)},${esc(nom)},${p.isAdmin?'Oui':'Non'}\n`);
+    const profile = await getContactProfile(bot.client, p.id.user);
+    const phone = profile.phone || String(p.id.user).replace(/\D/g, '');
+    const email = emailForGroupExport(phone, profile.email, emailFallback);
+    const line = [
+      email,
+      `${phonePrefix}${phone}`,
+      profile.prenom,
+      profile.nom,
+      newsletterValue,
+    ].map(esc).join(',');
+    res.write(line + '\n');
     if (i < participants.length - 1) await sleep(EXPORT_GROUP_INTER_DELAY_MS);
   }
   console.log(`[export-group] ✅ ${total} contacts exportés`);

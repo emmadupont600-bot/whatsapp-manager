@@ -370,7 +370,7 @@ tr:hover td{background:var(--surface2)}
 
       <div class="card">
         <div class="card-title">Fichiers CSV</div>
-        <p style="color:var(--muted);font-size:12px;margin-bottom:12px">Colonnes : <strong>telephone</strong> (requis) · <strong>prenom</strong>, <strong>nom</strong>, <strong>message</strong>, <strong>link</strong> (optionnel). Les numéros déjà contactés seront signalés avec le résumé des envois précédents.</p>
+        <p style="color:var(--muted);font-size:12px;margin-bottom:12px">Colonnes reconnues : <strong>Téléphone</strong> (requis), <strong>Prénom</strong>, <strong>Nom</strong>, <strong>Adresse e-mail</strong>, <strong>Inscription newsletter</strong>, plus <strong>message</strong> / <strong>link</strong> (optionnel). Export groupes = même format.</p>
 
         <div class="merge-mode-box" id="merge-info" style="display:none">
           ℹ️ <span id="merge-info-text">Mode fusion activé — les doublons seront ignorés automatiquement.</span>
@@ -577,12 +577,31 @@ tr:hover td{background:var(--surface2)}
         </div>
       </div>
       <div class="card" style="padding:12px 16px;margin-bottom:14px">
+        <div class="form-group" style="margin-bottom:10px">
+          <label>Inscription newsletter (tous les contacts)</label>
+          <select id="groups-newsletter" style="width:100%;padding:8px;font-size:13px">
+            <option value="oui" selected>Oui</option>
+            <option value="Oui">Oui (majuscule)</option>
+            <option value="1">1</option>
+            <option value="non">Non</option>
+          </select>
+        </div>
+        <div class="form-group" style="margin-bottom:0">
+          <label>E-mail par défaut si absent sur WhatsApp (optionnel)</label>
+          <input type="text" id="groups-email-fallback" placeholder="ex. contact+{phone}@votre-domaine.com" style="width:100%">
+          <p style="font-size:11px;color:var(--muted);margin-top:6px">{phone} sera remplacé par le numéro. Laissez vide si votre outil accepte les e-mails vides.</p>
+        </div>
+      </div>
+      <div class="card" style="padding:12px 16px;margin-bottom:14px">
         <p style="font-size:12px;color:var(--muted);line-height:1.6;margin-bottom:8px">
           Les groupes sont listés depuis le <strong>compte choisi ci-dessus</strong>, indépendamment du compte actif sur Dashboard / Import / Queue.
         </p>
         <p style="font-size:12px;color:var(--muted);line-height:1.6">
-          Export CSV : <strong>telephone</strong>, <strong>prenom</strong> et <strong>nom</strong> (profil WhatsApp si visible).
-          Les numéros sans nom affiché restent exportés avec téléphone seulement — comptez ~2 s par membre pour les gros groupes.
+          Export CSV (compatible import) :
+          <strong>Adresse e-mail</strong>, <strong>Téléphone</strong>, <strong>Prénom</strong>, <strong>Nom</strong>,
+          <strong>Inscription newsletter</strong> (= <strong>oui</strong> pour tous par défaut).
+          L’e-mail vient de WhatsApp si disponible, sinon vide (voir option ci-dessous).
+          Comptez ~2 s par membre pour les gros groupes.
         </p>
       </div>
       <div class="card"><div class="table-wrap"><table><thead><tr><th>Groupe</th><th>Membres</th><th>Export CSV</th></tr></thead><tbody id="groups-table"><tr><td colspan="3" style="color:var(--muted);text-align:center;padding:20px">Cliquez sur Actualiser</td></tr></tbody></table></div></div>
@@ -2422,12 +2441,15 @@ function exportGroup(btn) {
   const acct = parseInt(btn.dataset.account, 10) || getGroupsAccount();
   const groupName = decodeURIComponent(btn.dataset.group || '');
   const enc = encodeURIComponent(groupName);
+  const newsletter = encodeURIComponent(document.getElementById('groups-newsletter')?.value || 'oui');
+  const emailFb = encodeURIComponent(document.getElementById('groups-email-fallback')?.value.trim() || '');
+  const qs = `newsletter=${newsletter}${emailFb ? `&emailFallback=${emailFb}` : ''}`;
   const status = document.getElementById('groups-export-status');
   const estSec = Math.max(30, Math.round((parseInt(btn.dataset.members, 10) || 50) * 2));
-  if (status) status.innerHTML = `⏳ Export compte ${acct} « ${escHtml(groupName)} » (~${estSec}s)…`;
+  if (status) status.innerHTML = `⏳ Export compte ${acct} « ${escHtml(groupName)} » (~${estSec}s) · newsletter=${escHtml(decodeURIComponent(newsletter))}…`;
   btn.disabled = true;
   btn.textContent = '⏳ Export…';
-  window.open(apiUrl(`/api/${acct}/export-group/${enc}`), '_blank');
+  window.open(apiUrl(`/api/${acct}/export-group/${enc}?${qs}`), '_blank');
   setTimeout(() => {
     btn.disabled = false;
     btn.textContent = '⬇ Exporter CSV';
