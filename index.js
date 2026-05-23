@@ -2565,24 +2565,48 @@ app.post('/api/:account/prepare-campaign', async (req, res) => {
   const aiSpin = req.body.aiSpin !== false;
   if (!pitch) return res.status(400).json({ ok: false, error: 'Message (question) requis' });
   if (!link) return res.status(400).json({ ok: false, error: 'Lien du groupe requis — envoyé uniquement si la personne répond oui' });
-  let question = pitch;
-  let aiQuestionUsed = false;
+  let message = pitch;
+  let aiPrepareUsed = false;
+  const useShortQuestion = process.env.AI_PREPARE_SHORT === '1' && pitch.length < 120;
+
   if (link && ai.isAiEnabled()) {
     try {
-      question = await ai.generateConversationalQuestion(pitch, link);
-      aiQuestionUsed = true;
-      bot.log('🤖 Question générée (Groq)', 'info');
+      if (useShortQuestion) {
+        message = await ai.generateConversationalQuestion(pitch, link);
+        bot.log('🤖 Question courte (mode AI_PREPARE_SHORT)', 'info');
+      } else {
+        message = await ai.prepareCampaignMessage(pitch, link);
+        bot.log(`🤖 Message préparé (Groq) — ${pitch.length} → ${message.length} car.`, 'info');
+      }
+      aiPrepareUsed = true;
     } catch (e) {
-      bot.log(`⚠️ IA question : ${e.message}`, 'warn');
+      bot.log(`⚠️ IA préparation : ${e.message} — texte original conservé`, 'warn');
+      message = pitch;
     }
   } else if (link && !ai.isAiEnabled()) {
     bot.log('⚠️ GROQ_API_KEY absente', 'warn');
   }
-  bot.setCampaign({ messageOriginal: question, message: question, pitch, link, aiSpin });
+
+  bot.setCampaign({
+    messageOriginal: pitch,
+    message,
+    pitch,
+    link,
+    aiSpin,
+  });
   const provider = ai.getAiProvider();
   res.json({
-    ok: true, message: question, messageOriginal: pitch, link, aiSpin,
-    aiQuestionUsed, aiEnabled: ai.isAiEnabled(), aiProvider: provider?.name || null,
+    ok: true,
+    message,
+    messageOriginal: pitch,
+    link,
+    aiSpin,
+    aiPrepareUsed,
+    aiQuestionUsed: useShortQuestion && aiPrepareUsed,
+    sourceLength: pitch.length,
+    preparedLength: message.length,
+    aiEnabled: ai.isAiEnabled(),
+    aiProvider: provider?.name || null,
   });
 });
 
