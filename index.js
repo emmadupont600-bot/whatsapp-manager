@@ -322,7 +322,9 @@ let config = {
   maxMessagesPerHour: parseInt(process.env.MAX_MSGS_PER_HOUR || '80'),
   dailyLimit:     {},
   autoResume:     true,
-  quotaAsContacts: true
+  quotaAsContacts: true,
+  /** off | placeholder | paren — voir personalizeMessage */
+  prenomMode:     (process.env.PRENOM_MODE || 'off').toLowerCase(),
 };
 const CONFIG_FILE = path.join(__dirname, 'data', 'config.json');
 if (fs.existsSync(CONFIG_FILE)) {
@@ -390,15 +392,57 @@ function countOutboundMessages(rawMsg) {
   return (rawMsg || '').trim() ? 1 : 0;
 }
 
-function personalizeMessage(template, contact = {}) {
+function normalizePrenomMode(mode) {
+  const m = String(mode || '').toLowerCase();
+  if (m === 'placeholder' || m === 'placeholders' || m === 'tag') return 'placeholder';
+  if (m === 'paren' || m === 'parentheses' || m === 'parenthese') return 'paren';
+  return 'off';
+}
+
+function resolvePrenomMode(contact, bot) {
+  if (contact && contact.prenomMode) return normalizePrenomMode(contact.prenomMode);
+  if (bot && bot.state.campaign && bot.state.campaign.prenomMode) {
+    return normalizePrenomMode(bot.state.campaign.prenomMode);
+  }
+  return normalizePrenomMode(config.prenomMode);
+}
+
+function personalizeMessage(template, contact = {}, options = {}) {
   if (!template) return template;
   const c = contact || {};
-  return template
-    .replace(/\{pr[eé]nom\}/gi, c.prenom || c.nom || '')
-    .replace(/\{nom\}/gi,       c.nom    || c.prenom || '')
-    .replace(/\{name\}/gi,      c.prenom || c.nom || '')
-    .replace(/\{phone\}/gi,     c.phone  || '')
-    .trim();
+  const mode = normalizePrenomMode(options.prenomMode);
+  const prenom = (c.prenom || '').trim();
+  const nom = (c.nom || '').trim();
+  const phone = (c.phone || '').replace(/\D/g, '');
+
+  let out = template;
+
+  if (mode === 'off') {
+    out = out
+      .replace(/\{pr[eé]nom\}/gi, '')
+      .replace(/\{nom\}/gi, '')
+      .replace(/\{name\}/gi, '')
+      .replace(/\{phone\}/gi, phone);
+  } else {
+    const prenomVal = prenom || nom || '';
+    const nomVal = nom || prenom || '';
+    out = out
+      .replace(/\{pr[eé]nom\}/gi, prenomVal)
+      .replace(/\{nom\}/gi, nomVal)
+      .replace(/\{name\}/gi, prenomVal)
+      .replace(/\{phone\}/gi, phone);
+  }
+
+  out = out.replace(/\s{2,}/g, ' ').replace(/\s+([,.!?])/g, '$1').trim();
+
+  if (mode === 'paren' && prenom) {
+    const low = out.toLowerCase();
+    if (!low.includes(prenom.toLowerCase())) {
+      out = `${out} (${prenom})`.trim();
+    }
+  }
+
+  return out;
 }
 
 function removeLocks(dir) {
@@ -1767,16 +1811,17 @@ class BotAccount {
   }
 
   async _resolveContactMessage(contact, sendIndex) {
+    const prenomMode = resolvePrenomMode(contact, this);
     const toSend = (contact.message || '').trim();
     const spinBase = (contact.messageOriginal || contact.message || '').trim();
     if (!toSend && !spinBase) return '';
     if (sendIndex === 0 || !this._campaignUsesAiSpin()) {
-      return personalizeMessage(toSend || spinBase, contact);
+      return personalizeMessage(toSend || spinBase, contact, { prenomMode });
     }
-    if (!ai.isAiEnabled()) return personalizeMessage(toSend || spinBase, contact);
+    if (!ai.isAiEnabled()) return personalizeMessage(toSend || spinBase, contact, { prenomMode });
     try {
       const spun = await ai.spinMessage(spinBase, {
-        prenom: contact.prenom,
+        prenomMode,
         index: sendIndex,
         previousSpins: this.state.spinUsed || [],
       });
@@ -1784,10 +1829,10 @@ class BotAccount {
       this.state.spinUsed.push(spun);
       if (this.state.spinUsed.length > 200) this.state.spinUsed = this.state.spinUsed.slice(-200);
       this.log(`🤖 Spin IA #${sendIndex + 1} (Groq) pour +${contact.phone.replace(/\D/g, '')}`, 'info');
-      return personalizeMessage(spun, contact);
+      return personalizeMessage(spun, contact, { prenomMode });
     } catch (e) {
       this.log(`⚠️ Spin IA : ${e.message} — texte original`, 'warn');
-      return personalizeMessage(toSend || spinBase, contact);
+      return personalizeMessage(toSend || spinBase, contact, { prenomMode });
     }
   }
 
@@ -1796,7 +1841,7 @@ class BotAccount {
     if (!link || contact.linkSent) return false;
     const number = phoneDigits.replace(/\D/g, '');
     const cusChatId = normalizeOutboundChatId(`${number}@c.us`, number);
-    const personalizedLink = personalizeMessage(link, contact);
+    const personalizedLink = personalizeMessage(link, contact, { prenomMode: resolvePrenomMode(contact, this) });
     if (!(await this._waitForHourlyCapacity(1))) return false;
     if (this._dailyLimitReached()) return false;
     await resolveOutboundChatId(this.client, number, this.log.bind(this));
@@ -1922,7 +1967,8 @@ class BotAccount {
       messageOriginal: contact.messageOriginal || contact.message,
     };
     const rawMsg = await this._resolveContactMessage(workContact, sendIndex);
-    const personalizedLink = personalizeMessage((link ?? contact.link ?? '').trim(), contact);
+    const prenomMode = resolvePrenomMode(contact, this);
+    const personalizedLink = personalizeMessage((link ?? contact.link ?? '').trim(), contact, { prenomMode });
     const hasLink = !!personalizedLink;
     const useOpener = !hasLink && shouldUseManualOpener(number, isColdContact);
     const openerText = useOpener ? getColdOpenerText() : '';
@@ -2177,6 +2223,7 @@ class BotAccount {
       link: (opts.link || '').trim(),
       conversational: true,
       aiSpin: opts.aiSpin !== false,
+      prenomMode: normalizePrenomMode(opts.prenomMode ?? config.prenomMode),
       preparedAt: new Date().toISOString(),
     };
     if (!this.state.spinUsed) this.state.spinUsed = [];
@@ -2205,12 +2252,15 @@ class BotAccount {
       const hasLink = !!(row.link || defaultLink);
       let aiSpin = campaignOpts.aiSpin !== false && (this.state.campaign?.aiSpin !== false);
       if (campaignOpts.aiSpin === false) aiSpin = false;
+      const prenomMode = normalizePrenomMode(
+        campaignOpts.prenomMode ?? this.state.campaign?.prenomMode ?? config.prenomMode
+      );
       this.state.queue.push({
         phone, status: 'pending', prenom: prenom.trim(), nom: nom.trim(),
         message: msg,
         messageOriginal: (campaignOpts.messageOriginal || msg).trim(),
         link: (row.link || defaultLink || this.state.campaign?.link || '').trim(),
-        aiSpin, awaitingLink: false, linkSent: false,
+        aiSpin, prenomMode, awaitingLink: false, linkSent: false,
         addedAt: new Date().toISOString(),
       });
       added++;
@@ -2239,7 +2289,9 @@ class BotAccount {
     let pendingWhatsAppMessages = 0;
     for (const c of pendingList) {
       pendingWhatsAppMessages += countOutboundMessages(
-        personalizeMessage((c.message || '').trim() || process.env.DEFAULT_MESSAGE || '', c)
+        personalizeMessage((c.message || '').trim() || process.env.DEFAULT_MESSAGE || '', c, {
+          prenomMode: resolvePrenomMode(c, this),
+        })
       );
     }
     this._pruneSendTimestamps();
@@ -2575,7 +2627,7 @@ app.post('/api/:account/prepare-campaign', async (req, res) => {
         message = await ai.generateConversationalQuestion(pitch, link);
         bot.log('🤖 Question courte (mode AI_PREPARE_SHORT)', 'info');
       } else {
-        message = await ai.prepareCampaignMessage(pitch, link);
+        message = await ai.prepareCampaignMessage(pitch, link, { prenomMode });
         bot.log(`🤖 Message préparé (Groq) — ${pitch.length} → ${message.length} car.`, 'info');
       }
       aiPrepareUsed = true;
@@ -2587,12 +2639,14 @@ app.post('/api/:account/prepare-campaign', async (req, res) => {
     bot.log('⚠️ GROQ_API_KEY absente', 'warn');
   }
 
+  const prenomMode = normalizePrenomMode(req.body.prenomMode ?? config.prenomMode);
   bot.setCampaign({
     messageOriginal: pitch,
     message,
     pitch,
     link,
     aiSpin,
+    prenomMode,
   });
   const provider = ai.getAiProvider();
   res.json({
@@ -2607,6 +2661,7 @@ app.post('/api/:account/prepare-campaign', async (req, res) => {
     preparedLength: message.length,
     aiEnabled: ai.isAiEnabled(),
     aiProvider: provider?.name || null,
+    prenomMode,
   });
 });
 
@@ -2624,9 +2679,14 @@ app.post('/api/:account/import', upload.single('file'), (req,res)=>{
     const link=(req.body.link||'').trim();
     if(!message) return res.status(400).json({ok:false,error:'Message (question) requis'});
     if(!link) return res.status(400).json({ok:false,error:'Lien du groupe requis — envoyé si oui, rien si non'});
-    if (!bot.state.campaign) bot.setCampaign({ messageOriginal, message, link, aiSpin });
-    else { bot.state.campaign.message = message; bot.state.campaign.link = link; }
-    result=bot.importCSV(content, message, link, forceInclude, { messageOriginal, aiSpin });
+    const prenomMode = normalizePrenomMode(req.body.prenomMode ?? bot.state.campaign?.prenomMode ?? config.prenomMode);
+    if (!bot.state.campaign) bot.setCampaign({ messageOriginal, message, link, aiSpin, prenomMode });
+    else {
+      bot.state.campaign.message = message;
+      bot.state.campaign.link = link;
+      bot.state.campaign.prenomMode = prenomMode;
+    }
+    result=bot.importCSV(content, message, link, forceInclude, { messageOriginal, aiSpin, prenomMode });
   } catch(e){ return res.status(400).json({ok:false,error:e.message}); }
   finally { try { fs.unlinkSync(req.file.path); } catch(_) {} }
   if(result.duplicates.length>0 && forceInclude.length===0) res.json({ok:true,...result,needsConfirmation:true});
@@ -2706,6 +2766,7 @@ app.post('/api/config', (req, res) => {
   if (errors.length > 0) return res.status(400).json({ ok: false, errors });
   if (req.body.autoResume !== undefined) config.autoResume = Boolean(req.body.autoResume);
   if (req.body.quotaAsContacts !== undefined) config.quotaAsContacts = Boolean(req.body.quotaAsContacts);
+  if (req.body.prenomMode !== undefined) config.prenomMode = normalizePrenomMode(req.body.prenomMode);
   saveConfig();
   res.json({ ok: true, config });
 });

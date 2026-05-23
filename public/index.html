@@ -323,8 +323,17 @@ tr:hover td{background:var(--surface2)}
       <div class="card">
         <div class="card-title">Message</div>
         <div class="form-group">
-          <label>Texte du message * <span style="font-weight:400;color:var(--muted)">(utilisez <code style="background:var(--surface2);padding:1px 5px;border-radius:3px">{prénom}</code> pour personnaliser)</span></label>
-          <textarea id="import-message" placeholder="Bonjour {prénom} 👋 j'ai pensé à toi pour cette opportunité..." oninput="updatePreview()"></textarea>
+          <label>Texte du message *</label>
+          <textarea id="import-message" placeholder="Votre message complet (sans prénom obligatoire)..." oninput="updatePreview()"></textarea>
+          <div class="form-group" style="margin-top:12px">
+            <label>Prénom dans les messages envoyés</label>
+            <select id="prenom-mode" onchange="updatePreview()" style="width:100%;padding:8px 10px;font-size:13px">
+              <option value="off">Non — aucun prénom ajouté (recommandé)</option>
+              <option value="placeholder">Uniquement si j'écris {prénom} dans le texte</option>
+              <option value="paren">Oui — ajouter (prénom) à la fin si connu dans le CSV</option>
+            </select>
+            <p id="prenom-mode-hint" style="font-size:11px;color:var(--muted);margin-top:6px;line-height:1.5"></p>
+          </div>
           <div class="msg-count" id="msg-count">0 caractères</div>
         </div>
         <div class="form-group" style="background:color-mix(in oklch,var(--green) 8%,var(--surface));border:1px solid color-mix(in oklch,var(--green) 30%,var(--border));border-radius:8px;padding:12px">
@@ -1987,11 +1996,40 @@ function renderCSVFileList() {
   btnImport.style.display='inline-flex'; btnClear.style.display='inline-flex';
 }
 
+function getPrenomMode() {
+  const el = document.getElementById('prenom-mode');
+  return el ? el.value : 'off';
+}
+
 function getCampaignFormFlags() {
   return {
     aiSpin: document.getElementById('ai-spin-mode')?.checked !== false,
+    prenomMode: getPrenomMode(),
     messageOriginal: window._campaignMessageOriginal || document.getElementById('import-message').value.trim(),
   };
+}
+
+function previewPersonalizeClient(msg) {
+  const mode = getPrenomMode();
+  const sample = { prenom: 'Marie', nom: 'Dupont', phone: '33612345678' };
+  if (mode === 'off') {
+    return msg
+      .replace(/\{prénom\}/gi, '')
+      .replace(/\{prenom\}/gi, '')
+      .replace(/\{nom\}/gi, '')
+      .replace(/\{name\}/gi, '')
+      .replace(/\s{2,}/g, ' ')
+      .trim();
+  }
+  let out = msg
+    .replace(/\{prénom\}/gi, 'Marie')
+    .replace(/\{prenom\}/gi, 'Marie')
+    .replace(/\{nom\}/gi, 'Dupont')
+    .replace(/\{name\}/gi, 'Marie');
+  if (mode === 'paren' && !out.toLowerCase().includes('marie')) {
+    out = `${out} (Marie)`.trim();
+  }
+  return out;
 }
 
 async function prepareCampaign() {
@@ -2010,6 +2048,7 @@ async function prepareCampaign() {
       body: JSON.stringify({
         message: pitch, link,
         aiSpin: document.getElementById('ai-spin-mode')?.checked !== false,
+        prenomMode: getPrenomMode(),
       }),
     }).then(x => x.json());
     if (!r.ok) throw new Error(r.error || 'Échec');
@@ -2034,6 +2073,7 @@ async function postImportCSV(file, message, link, forceInclude = []) {
   fd.append('message', message);
   if (link) fd.append('link', link);
   fd.append('aiSpin', flags.aiSpin ? '1' : '0');
+  fd.append('prenomMode', flags.prenomMode || 'off');
   if (flags.messageOriginal) fd.append('messageOriginal', flags.messageOriginal);
   if (forceInclude.length) fd.append('forceInclude', JSON.stringify(forceInclude));
   return fetch(`/api/${currentAccount}/import`, { method: 'POST', body: fd }).then(r => r.json());
@@ -2217,8 +2257,17 @@ function updatePreview() {
       ? '<span class="badge badge-blue">1 question / contact · lien après réponse +</span>'
       : waCount === 1 ? '<span class="badge badge-blue">1 message / contact</span>' : '';
   }
+  const hint = document.getElementById('prenom-mode-hint');
+  if (hint) {
+    const m = getPrenomMode();
+    hint.textContent = m === 'off'
+      ? 'Les prénoms du CSV ne seront pas insérés dans le message (l’IA non plus).'
+      : m === 'paren'
+        ? 'Ex. « Votre texte… (Marie) » si la colonne prenom est remplie.'
+        : 'Seuls les emplacements {prénom} / {nom} dans votre texte seront remplacés.';
+  }
   const p = document.getElementById('msg-preview');
-  const preview = msg.replace(/\{prénom\}/gi,'Marie').replace(/\{nom\}/gi,'Dupont').replace(/\{prenom\}/gi,'Marie');
+  const preview = previewPersonalizeClient(msg);
   if (msg.trim()) { p.style.color='var(--text)'; p.textContent=preview; }
   else { p.style.color='var(--muted)'; p.textContent='Votre message apparaîtra ici...'; }
   const linkWrap = document.getElementById('link-preview-wrap');
@@ -2253,6 +2302,14 @@ async function setLimit() {
     setTimeout(()=>el.style.display='none',2000);
     fetchStatus();
   }
+}
+
+async function loadPrenomModePref() {
+  try {
+    const cfg = await fetch('/api/config').then(r => r.json());
+    const sel = document.getElementById('prenom-mode');
+    if (sel && cfg.prenomMode) sel.value = cfg.prenomMode;
+  } catch (_) {}
 }
 
 async function loadSettings() {
@@ -2427,6 +2484,7 @@ loadQuotaDisplayPref();
   if (tok) tok.value = localStorage.getItem('wa_api_token') || '';
   if (base) base.value = localStorage.getItem('wa_api_base') || '';
 })();
+loadPrenomModePref();
 runApiDiagnostic();
 checkHealth();
 fetchStatus();
